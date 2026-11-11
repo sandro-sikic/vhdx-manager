@@ -104,7 +104,7 @@ Read-only. Checks Windows edition, UEFI, NTFS, free space, BitLocker/Device Encr
 | Edition                                        | Which edition to apply. Home triggers a warning.                                                                                                                                                                                                                                                                           |
 | File name                                      | Disk file name (letters, digits, `-`, `_`; `.vhdx` added). Tip: include the version, e.g. `base-25H2`.                                                                                                                                                                                                                     |
 | Boot menu name                                 | Label shown in the boot menu.                                                                                                                                                                                                                                                                                              |
-| Max size (GB)                                  | Largest size the dynamic disk can grow to (40-4000, default 100). All environments inherit it.                                                                                                                                                                                                                             |
+| Max size (GB)                                  | Largest size the dynamic disk can grow to (40-4000). Default: 50% of the free space on the VHD folder's drive (until you change it by hand; 100 if that cannot be read). All environments inherit it.                                                                                                                                                                                                                             |
 | Add it to the boot menu                        | Creates the boot entry so you can set the base up. Your current default is unchanged.                                                                                                                                                                                                                                      |
 | Don't expand the file to full size when booted | Writes `VirtualDiskExpandOnMount=4` into the new Windows so the file does not grow to its full maximum while booted. Risk: if the physical drive fills up, that Windows crashes.                                                                                                                                           |
 | Answer file / Use ISO's autounattend.xml       | See [Answer files](#answer-files-autounattendxml).                                                                                                                                                                                                                                                                         |
@@ -113,7 +113,7 @@ Read-only. Checks Windows edition, UEFI, NTFS, free space, BitLocker/Device Encr
 
 ### 3. Environments
 
-Lists every `.vhdx` in the VHD folder with its type: **Base** (has children), **Child** (built on a base) or **Standalone** (no parent). The running one is marked `RUNNING`; locked ones `locked`.
+Lists every `.vhdx` in the VHD folder with its type, file size and maximum size (Max): **Base** (has children), **Child** (built on a base) or **Standalone** (no parent). The running one is marked `RUNNING`; locked ones `locked`.
 
 | Button                                | What it does                                                                                                 |
 | ------------------------------------- | ------------------------------------------------------------------------------------------------------------ |
@@ -128,6 +128,7 @@ Lists every `.vhdx` in the VHD folder with its type: **Base** (has children), **
 | Set as default boot                   | Makes it the automatic boot choice.                                                                          |
 | Add / Rename / Remove boot menu entry | Manage its boot menu entry without touching the file.                                                        |
 | Disable expand-on-boot                | Applies the no-expand registry setting to an existing environment.                                           |
+| Change max size...                    | Grows (or, with the Hyper-V module, shrinks) the maximum size of a standalone disk. See [Limitations](#limitations-and-good-to-know). |
 | Lock / unlock                         | Read-only + removed from the boot menu (lock), or writable again (unlock; only when nothing is built on it). |
 
 Most actions refuse to run on the Windows you are currently running, and refuse to change a base that has children.
@@ -195,6 +196,7 @@ Inside the VHD folder:
 
 - **Hibernation and BitLocker** do not work inside a VHDX-booted Windows.
 - **Windows version upgrades** (e.g. 24H2 to 25H2) cannot be installed in place: build a new base from the new ISO. Monthly cumulative updates work normally.
+- **Resizing:** only standalone disks (and bases nobody is built on) can change their maximum size; environments built on a base (differencing disks) cannot, so use _Make standalone copy_ first. Growing enlarges the disk and extends the Windows partition inside it automatically. Shrinking needs the Hyper-V PowerShell module (Resize-VHD) and only works if the data inside fits. The disk must not be running, locked or attached.
 - A dynamic VHDX grows to its full maximum size while booted unless _don't expand_ is set. Keep enough free space or tick that option.
 - Changing a base after children exist corrupts them. That is why the tool locks it.
 - Activation: a digital licence normally activates the same edition you already have on the PC.

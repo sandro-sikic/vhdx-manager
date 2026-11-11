@@ -24,14 +24,17 @@
     Before every change to the boot menu it saves a timestamped backup of the
     boot configuration into <VHD folder>\bcd-backups (restore it on tab 5).
 #>
+# Test-only switches: -NoElevate skips the elevate/relaunch block; -AutoCloseSeconds N closes the window after N s;
+# -ScreenshotDir <dir> saves page1..page5.png of the window and closes.
+param([switch]$NoElevate, [int]$AutoCloseSeconds = 0, [string]$ScreenshotDir = '')
 
 # --------------------------------------------------------------------------
 #  Relaunch elevated, 64-bit, in Windows PowerShell 5.1 (WinForms + DISM)
 # --------------------------------------------------------------------------
-$isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+$isAdmin =([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 $is32on64 = [Environment]::Is64BitOperatingSystem -and -not [Environment]::Is64BitProcess
 $isCore = $PSVersionTable.PSEdition -eq 'Core'
-if (-not $isAdmin -or $is32on64 -or $isCore) {
+if (-not $NoElevate -and (-not $isAdmin -or $is32on64 -or $isCore)) {
   $exe = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
   if ($is32on64) { $exe = Join-Path $env:SystemRoot 'SysNative\WindowsPowerShell\v1.0\powershell.exe' }
   Start-Process -FilePath $exe -Verb RunAs -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-STA', '-File', "`"$PSCommandPath`"")
@@ -857,6 +860,8 @@ function Update-EnvList {
       [void]$it.SubItems.Add($e.Type)
       [void]$it.SubItems.Add($parentName)
       [void]$it.SubItems.Add(('{0:N2} GB' -f $e.SizeGB))
+      $maxText = '-'; if ($e.MaxGB) { $maxText = "$($e.MaxGB) GB" }
+      [void]$it.SubItems.Add($maxText)
       [void]$it.SubItems.Add($bootName)
       [void]$it.SubItems.Add($status)
       $it.Tag = $e
@@ -1067,6 +1072,142 @@ function Disable-EnvExpand {
   Write-Log "Done for '$($e.Name)'."
 }
 
+# ---- change the maximum size of a disk ----
+# Half of the free space, in whole GB (floor). Callers clamp it to their own limits.
+function Get-HalfFreeGB([double]$FreeBytes) {
+  return [int][math]::Min(1000000, [math]::Floor($FreeBytes / 1GB / 2))
+}
+
+# Suggested new max size for an existing disk: 50% of the free space (max 4000), but only if it is bigger than the current size; else 0.
+function Get-SuggestedMaxGB([double]$FreeBytes, [int]$CurrentGB) {
+  $s = [int][math]::Min(4000, (Get-HalfFreeGB $FreeBytes))
+  if ($s -gt $CurrentGB) { return $s }
+  return 0
+}
+
+# Parses the size typed by the user: integer 40..4000, otherwise throws.
+function Convert-MaxGBInput([string]$Text) {
+  if ($Text -notmatch '^\d{1,5}$') { throw 'Please enter the size as a whole number of GB (digits only), between 40 and 4000.' }
+  $n = [int]$Text
+  if ($n -lt 40 -or $n -gt 4000) { throw 'The size must be between 40 and 4000 GB.' }
+  return $n
+}
+
+function Set-EnvMaxSize {
+  $e = Get-SelectedEnv
+  Assert-NotRunning $e
+  if ($e.Type -eq 'Child') {
+    throw "'$($e.Name)' is a differencing disk built on '$([IO.Path]::GetFileNameWithoutExtension($e.Parent))'. Differencing disks cannot be resized.`r`n`r`nUse 'Make standalone copy' first, then change the size of the copy."
+  }
+  if ($e.Children.Count) {
+    throw "'$($e.Name)' is the base of: $($e.Children -join ', '). A base with environments built on it cannot be resized (that would corrupt them).`r`n`r`nUse 'Make standalone copy' on one of those environments, then change the size of the copy."
+  }
+  if ($e.ReadOnly) { throw "'$($e.Name)' is locked (read-only). Use 'Lock / unlock' to unlock it first, then try again." }
+  $img = $null
+  try { $img = Get-DiskImage -ImagePath $e.Path -ErrorAction Stop } catch {}
+  if ($img -and $img.Attached) { throw "'$($e.Name)' is currently attached (mounted) in Windows. Detach it (Disk Management > Detach VHD) and try again." }
+
+  $cur = [int]$e.MaxGB
+  if ($cur -le 0) {
+    try { $cur = [int][math]::Ceiling($img.Size / 1GB) } catch {}
+  }
+  if ($cur -le 0) { throw "Could not determine the current maximum size of '$($e.Name)'." }
+
+  $drv = $e.Path.Substring(0, 2).ToUpper()
+  $freeBytes = (New-Object IO.DriveInfo($e.Path.Substring(0, 1))).AvailableFreeSpace
+  $freeGB = [math]::Round($freeBytes / 1GB, 1)
+  $sug = Get-SuggestedMaxGB $freeBytes $cur
+  $prompt = "New maximum size for '$($e.Name)' in GB (40-4000).`r`nCurrent: $cur GB.   Free space on ${drv}: $freeGB GB."
+  $def = "$cur"
+  if ($sug) { $prompt += "`r`n`r`nSuggested: $sug GB (50% of the free space on $drv)"; $def = "$sug" }
+  $t = Read-Text $prompt 'Change max size' $def
+  if (-not $t) { return }
+  $new = Convert-MaxGBInput $t
+  if ($new -eq $cur) { Show-Info "'$($e.Name)' already has a maximum size of $cur GB. Nothing to do." 'Change max size'; return }
+
+  $grow = ($new -gt $cur)
+  $summary = "Change the maximum size of '$($e.Name)':`r`n  $cur GB  ->  $new GB`r`n  Free space on ${drv}: $freeGB GB`r`n`r`nThe disk must not be in use (do not boot it or open files from it meanwhile)."
+  if ($grow) {
+    $summary += "`r`n`r`nThe virtual disk is enlarged and the Windows partition inside it is extended to use the new space."
+    if ($new -gt $freeGB) { $summary += "`r`nNote: $new GB is more than the free space on $drv. The file only grows as data is added, but keep enough space free." }
+  }
+  else {
+    if (-not $script:HasHyperV) { throw "Shrinking a disk needs the Hyper-V PowerShell module (Resize-VHD); diskpart cannot shrink a virtual disk. Install the Hyper-V PowerShell module, or choose a size larger than $cur GB." }
+    $summary += "`r`n`r`nWARNING: SHRINKING. The partition inside is shrunk first; this only works if your data fits into $new GB. Make a snapshot or copy first if the data matters."
+  }
+  if (-not (Confirm-Action ($summary + "`r`n`r`nContinue?") 'Change max size')) { return }
+
+  $path = $e.Path
+  if ($grow) {
+    # diskpart can only expand a DETACHED vdisk: expand first, then attach and extend the partition.
+    Invoke-Diskpart @("select vdisk file=`"$path`"", "expand vdisk maximum=$($new * 1024)")
+    Set-MetaEntry $e.Leaf $e.Parent $new
+    Write-Log "'$($e.Name)' virtual disk enlarged from $cur GB to $new GB."
+    $attached = $false
+    try {
+      $root = Mount-Vhdx $path; $attached = $true
+      $letter = $root.Substring(0, 1)
+      try { Update-HostStorageCache } catch {}
+      $part = Get-Partition -DriveLetter $letter
+      $max = (Get-PartitionSupportedSize -DriveLetter $letter).SizeMax
+      if ($max -gt ($part.Size + 1MB)) {
+        try { Resize-Partition -DriveLetter $letter -Size $max }
+        catch {
+          Write-Log "Resize-Partition failed ($($_.Exception.Message)); trying diskpart extend..."
+          Invoke-Diskpart @("select volume $letter", 'extend')
+        }
+        Write-Log "Partition extended to use the new space."
+      }
+      else { Write-Log 'The partition cannot grow any further (another partition follows it). The extra space stays unallocated.' }
+    }
+    catch {
+      Write-Log "The virtual disk WAS enlarged to $new GB, but the partition inside could not be extended: $($_.Exception.Message) Extend it later in Disk Management (or boot it and extend there)."
+      throw
+    }
+    finally { if ($attached) { try { Dismount-Vhdx $path } catch { Write-Log "Detach failed: $($_.Exception.Message)" } } }
+  }
+  else {
+    $newBytes = [int64]$new * 1GB
+    $attached = $false
+    try {
+      $root = Mount-Vhdx $path; $attached = $true
+      $letter = $root.Substring(0, 1)
+      try { Update-HostStorageCache } catch {}
+      $part = Get-Partition -DriveLetter $letter
+      $others = [int64]0
+      foreach ($op in @(Get-Partition -DiskNumber $part.DiskNumber)) { if ($op.PartitionNumber -ne $part.PartitionNumber) { $others += [int64]$op.Size } }
+      $slack = 32MB   # GPT headers, alignment
+      $target = [int64]([math]::Floor(($newBytes - $others - $slack) / 1MB) * 1MB)
+      $min = [int64](Get-PartitionSupportedSize -DriveLetter $letter).SizeMin
+      if ($target -lt $min) {
+        $needGB = [int][math]::Ceiling(($min + $others + $slack) / 1GB)
+        throw "Not possible: the data inside '$($e.Name)' needs about $needGB GB at least (partition minimum $([math]::Round($min / 1GB, 1)) GB plus system partitions). Choose $needGB GB or more, or free up space inside it first."
+      }
+      if ($target -lt $part.Size) {
+        Write-Log "Shrinking the partition to $([math]::Round($target / 1GB, 2)) GB..."
+        Resize-Partition -DriveLetter $letter -Size $target
+      }
+    }
+    catch {
+      Write-Log "Shrink stopped before the virtual disk was changed: $($_.Exception.Message)"
+      throw
+    }
+    finally { if ($attached) { try { Dismount-Vhdx $path } catch { Write-Log "Detach failed: $($_.Exception.Message)" } } }
+    try {
+      $minDisk = [int64](Get-VHD -Path $path).MinimumSize
+      if ($newBytes -lt $minDisk) { throw "The virtual disk cannot be smaller than $([math]::Ceiling($minDisk / 1GB)) GB (data at the end of the disk cannot be moved)." }
+      Resize-VHD -Path $path -SizeBytes $newBytes
+    }
+    catch {
+      Write-Log "Virtual disk NOT shrunk (still $cur GB). The partition inside may already be smaller, which is safe: $($_.Exception.Message)"
+      throw
+    }
+    Set-MetaEntry $e.Leaf $e.Parent $new
+    Write-Log "'$($e.Name)' virtual disk shrunk from $cur GB to $new GB."
+  }
+  Write-Log "Max size of '$($e.Name)' is now $new GB."
+}
+
 # ==========================================================================
 #  Step 4: boot menu
 # ==========================================================================
@@ -1102,44 +1243,612 @@ function Assert-BootableEntry($b) {
   }
 }
 
+# Free bytes on the drive of the VHD folder text (works even if the folder does not exist yet); $null if unknown.
+function Get-FolderFreeBytes([string]$Folder) {
+  try {
+    $f = $Folder.Trim()
+    if ($f -notmatch '^([A-Za-z]):') { return $null }
+    $d = New-Object IO.DriveInfo($Matches[1])
+    if (-not $d.IsReady) { return $null }
+    return [double]$d.AvailableFreeSpace
+  }
+  catch { return $null }
+}
+
+# Create base: default max size = 50% of the free space on the VHD folder's drive (40..4000), until the user picks a value by hand.
+function Update-DefaultBaseSize {
+  if ($script:SizeTouched -or -not $script:NumSize -or -not $script:TxtFolder) { return }
+  $free = Get-FolderFreeBytes $script:TxtFolder.Text
+  if ($null -eq $free) { return }
+  $gb = [math]::Max(40, [math]::Min(4000, (Get-HalfFreeGB $free)))
+  if ([int]$script:NumSize.Value -ne $gb) {
+    $script:SettingSize = $true
+    try { $script:NumSize.Value = $gb } finally { $script:SettingSize = $false }
+  }
+}
+
 function Update-All {
+  try { Update-DefaultBaseSize } catch {}
   Update-EnvList
   Update-BootList
   Update-BackupList
 }
 
 # ==========================================================================
-#  GUI
+#  GUI  (minimal rounded sidebar style - see ui-concepts\11-merged.ps1)
 # ==========================================================================
-function New-Btn($Parent, [string]$Text, [int]$X, [int]$Y, [int]$W, [string]$HelpText, [scriptblock]$Action, [int]$H = 32) {
-  $b = New-Object System.Windows.Forms.Button
-  $b.Text = $Text
-  $b.Location = New-Object System.Drawing.Point($X, $Y)
-  $b.Size = New-Object System.Drawing.Size($W, $H)
-  $Parent.Controls.Add($b)
+$cs = @'
+using System;
+using System.Collections.Generic;
+using System.Drawing;
+using System.Drawing.Drawing2D;
+using System.Runtime.InteropServices;
+using System.Windows.Forms;
+
+public static class Gfx {
+    public static Color C(string h) { return ColorTranslator.FromHtml(h); }
+    public static GraphicsPath Round(Rectangle r, int rad) {
+        GraphicsPath p = new GraphicsPath();
+        rad = Math.Min(rad, Math.Min(r.Width, r.Height) / 2);
+        if (rad < 1) { p.AddRectangle(r); return p; }
+        int d = rad * 2;
+        p.AddArc(r.X, r.Y, d, d, 180, 90); p.AddArc(r.Right - d, r.Y, d, d, 270, 90);
+        p.AddArc(r.Right - d, r.Bottom - d, d, d, 0, 90); p.AddArc(r.X, r.Bottom - d, d, d, 90, 90);
+        p.CloseFigure(); return p;
+    }
+    [DllImport("uxtheme.dll", CharSet = CharSet.Unicode)]
+    static extern int SetWindowTheme(IntPtr h, string app, string idl);
+    // thin modern scrollbars for native controls
+    public static void Explorer(Control c) {
+        try {
+            if (c.IsHandleCreated) SetWindowTheme(c.Handle, "Explorer", null);
+            c.HandleCreated += delegate { try { SetWindowTheme(c.Handle, "Explorer", null); } catch { } };
+        } catch { }
+    }
+}
+
+public class RBtn : Button {
+    public string Kind = "ghost";
+    public int Radius = 8;
+    bool hot, down;
+    public RBtn() {
+        SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw | ControlStyles.Selectable, true);
+        Cursor = Cursors.Hand; FlatStyle = FlatStyle.Flat;
+    }
+    protected override void OnMouseEnter(EventArgs e) { hot = true; Invalidate(); base.OnMouseEnter(e); }
+    protected override void OnMouseLeave(EventArgs e) { hot = false; down = false; Invalidate(); base.OnMouseLeave(e); }
+    protected override void OnMouseDown(MouseEventArgs e) { down = true; Invalidate(); base.OnMouseDown(e); }
+    protected override void OnMouseUp(MouseEventArgs e) { down = false; Invalidate(); base.OnMouseUp(e); }
+    protected override void OnGotFocus(EventArgs e) { Invalidate(); base.OnGotFocus(e); }
+    protected override void OnLostFocus(EventArgs e) { Invalidate(); base.OnLostFocus(e); }
+    protected override void OnEnabledChanged(EventArgs e) { Invalidate(); base.OnEnabledChanged(e); }
+    protected override void OnPaint(PaintEventArgs e) {
+        Graphics g = e.Graphics; g.SmoothingMode = SmoothingMode.AntiAlias;
+        g.Clear(Parent != null ? Parent.BackColor : Color.White);
+        Color ink = Gfx.C("#111111");
+        Color fill = Color.White, border, text; bool hasFill = false, dashed = false;
+        if (!Enabled) {
+            border = Gfx.C("#DDDDDD"); text = Gfx.C("#A6A6A6");
+            if (Kind == "primary") { hasFill = true; fill = Gfx.C("#F7C2AA"); border = fill; text = Color.White; }
+            else if (Kind == "danger") dashed = true;
+        } else if (Kind == "primary") {
+            hasFill = true; fill = down ? Gfx.C("#C73E00") : hot ? Gfx.C("#E04500") : Gfx.C("#FF4F00"); border = fill; text = Color.White;
+        } else if (Kind == "danger") {
+            dashed = true; border = ink; text = ink;
+            if (hot || down) { hasFill = true; fill = down ? Gfx.C("#333333") : ink; text = Color.White; }
+        } else {
+            border = hot ? ink : Gfx.C("#BDBDBD"); text = ink;
+            if (down) { hasFill = true; fill = Gfx.C("#EFEFEF"); } else if (hot) { hasFill = true; fill = Gfx.C("#F7F7F7"); }
+        }
+        Rectangle r = new Rectangle(0, 0, Width - 1, Height - 1);
+        using (GraphicsPath p = Gfx.Round(r, Radius)) {
+            if (hasFill) using (SolidBrush b = new SolidBrush(fill)) g.FillPath(b, p);
+            using (Pen pen = new Pen(border, 1f)) { if (dashed) pen.DashStyle = DashStyle.Dash; g.DrawPath(pen, p); }
+        }
+        TextRenderer.DrawText(g, Text, Font, ClientRectangle, text,
+            TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine | TextFormatFlags.NoPrefix | TextFormatFlags.EndEllipsis);
+        if (Focused && ShowFocusCues && Enabled) {
+            using (GraphicsPath fp = Gfx.Round(new Rectangle(3, 3, Width - 7, Height - 7), Math.Max(2, Radius - 3)))
+            using (Pen pen = new Pen(hasFill && Kind == "primary" ? Color.White : ink)) { pen.DashStyle = DashStyle.Dot; g.DrawPath(pen, fp); }
+        }
+    }
+}
+
+public class RCard : Panel {
+    public int Radius = 12;
+    public Color Edge = Gfx.C("#DDDDDD");
+    public RCard() {
+        SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
+        BackColor = Color.White;
+    }
+    protected override void OnPaint(PaintEventArgs e) {
+        Graphics g = e.Graphics; g.SmoothingMode = SmoothingMode.AntiAlias;
+        g.Clear(Parent != null ? Parent.BackColor : Color.White);
+        using (GraphicsPath p = Gfx.Round(new Rectangle(0, 0, Width - 1, Height - 1), Radius))
+        using (SolidBrush b = new SolidBrush(BackColor)) using (Pen pen = new Pen(Edge)) { g.FillPath(b, p); g.DrawPath(pen, p); }
+    }
+}
+
+public class RCheck : CheckBox {
+    public RCheck() {
+        SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
+        Cursor = Cursors.Hand;
+    }
+    protected override void OnGotFocus(EventArgs e) { Invalidate(); base.OnGotFocus(e); }
+    protected override void OnLostFocus(EventArgs e) { Invalidate(); base.OnLostFocus(e); }
+    protected override void OnEnabledChanged(EventArgs e) { Invalidate(); base.OnEnabledChanged(e); }
+    protected override void OnPaint(PaintEventArgs e) {
+        Graphics g = e.Graphics; g.SmoothingMode = SmoothingMode.AntiAlias;
+        g.Clear(Parent != null ? Parent.BackColor : Color.White);
+        int s = 18, y = (Height - s) / 2;
+        Rectangle rc = new Rectangle(1, y, s, s);
+        Color ink = Gfx.C("#111111");
+        Color boxFill = Enabled ? ink : Gfx.C("#C8C8C8");
+        using (GraphicsPath p = Gfx.Round(rc, 5)) {
+            if (Checked) {
+                using (SolidBrush b = new SolidBrush(boxFill)) g.FillPath(b, p);
+                using (Pen pen = new Pen(Color.White, 2f)) {
+                    pen.StartCap = LineCap.Round; pen.EndCap = LineCap.Round; pen.LineJoin = LineJoin.Round;
+                    g.DrawLines(pen, new PointF[] { new PointF(5.5f, y + 9.5f), new PointF(8.5f, y + 12.5f), new PointF(13.5f, y + 5.5f) });
+                }
+            } else {
+                using (SolidBrush b = new SolidBrush(Color.White)) g.FillPath(b, p);
+                using (Pen pen = new Pen(Enabled ? Gfx.C("#8A8A8A") : Gfx.C("#D0D0D0"), 1.2f)) g.DrawPath(pen, p);
+            }
+        }
+        if (Focused && ShowFocusCues) using (GraphicsPath fp = Gfx.Round(new Rectangle(-1, y - 2, s + 4, s + 4), 6)) using (Pen pen = new Pen(ink)) { pen.DashStyle = DashStyle.Dot; g.DrawPath(pen, fp); }
+        TextRenderer.DrawText(g, Text, Font, new Rectangle(s + 10, 0, Width - s - 10, Height), Enabled ? ForeColor : Gfx.C("#9A9A9A"),
+            TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine);
+    }
+}
+
+public class SpinBtn : Control {
+    NumericUpDown n; int zone;
+    public SpinBtn(NumericUpDown num) {
+        n = num; BackColor = Color.White; Cursor = Cursors.Hand; TabStop = false;
+        SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
+    }
+    protected override void OnPaint(PaintEventArgs e) {
+        Graphics g = e.Graphics; g.SmoothingMode = SmoothingMode.AntiAlias; g.Clear(BackColor);
+        RField rf = Parent as RField;
+        if (rf != null) using (GraphicsPath bp = Gfx.Round(new Rectangle(-Left, -Top, rf.Width - 1, rf.Height - 1), rf.Radius))
+            using (Pen bpn = new Pen(rf.Foc ? Gfx.C("#111111") : Gfx.C("#CFCFCF"))) g.DrawPath(bpn, bp);
+        float cx = (Width - 4) / 2f; float h = Height / 2f;
+        for (int k = 0; k < 2; k++) {
+            float cy = h * k + h / 2f; float d = (k == 0) ? 1.5f : -1.5f;
+            using (Pen p = new Pen(zone == k + 1 ? Gfx.C("#111111") : Gfx.C("#6B6B6B"), 1.5f)) {
+                p.StartCap = LineCap.Round; p.EndCap = LineCap.Round;
+                g.DrawLines(p, new PointF[] { new PointF(cx - 4, cy + d * 1.2f), new PointF(cx, cy - d * 1.2f), new PointF(cx + 4, cy + d * 1.2f) });
+            }
+        }
+    }
+    protected override void OnMouseMove(MouseEventArgs e) { int z = e.Y < Height / 2 ? 1 : 2; if (z != zone) { zone = z; Invalidate(); } base.OnMouseMove(e); }
+    protected override void OnMouseLeave(EventArgs e) { zone = 0; Invalidate(); base.OnMouseLeave(e); }
+    protected override void OnMouseDown(MouseEventArgs e) { if (e.Y < Height / 2) n.UpButton(); else n.DownButton(); base.OnMouseDown(e); }
+}
+
+// rounded host for a native TextBox / NumericUpDown (native borders and spin buttons are hidden/clipped)
+public class RField : Panel {
+    public Control Inner; public int Mode; bool foc; public bool Foc { get { return foc; } }
+    public int Radius = 8;
+    public RField(Control c, int mode) {
+        Inner = c; Mode = mode; BackColor = Color.White; Controls.Add(c);
+        SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
+        c.Enter += delegate { foc = true; Invalidate(); foreach (Control k in Controls) k.Invalidate(); };
+        c.Leave += delegate { foc = false; Invalidate(); foreach (Control k in Controls) k.Invalidate(); };
+        if (mode == 2) { SpinBtn sp = new SpinBtn((NumericUpDown)c); sp.Name = "spin"; Controls.Add(sp); sp.BringToFront(); }
+    }
+    protected override void OnResize(EventArgs e) { base.OnResize(e); DoLayout(); }
+    public void DoLayout() {
+        if (Inner == null) return;
+        if (Mode == 1) Inner.SetBounds(14, 10, Math.Max(10, Width - 28), Math.Max(10, Height - 20));
+        else if (Mode == 2) {
+            Inner.Left = 12; Inner.Width = Math.Max(10, Width - 12 + 24); Inner.Top = (Height - Inner.Height) / 2;
+            Control sp = Controls["spin"]; if (sp != null) sp.SetBounds(Width - 30, 0, 30, Height);
+        } else { Inner.Left = 12; Inner.Width = Math.Max(10, Width - 24); Inner.Top = (Height - Inner.Height) / 2; }
+    }
+    protected override void OnMouseDown(MouseEventArgs e) { Inner.Focus(); base.OnMouseDown(e); }
+    protected override void OnPaint(PaintEventArgs e) {
+        Graphics g = e.Graphics; g.SmoothingMode = SmoothingMode.AntiAlias;
+        g.Clear(Parent != null ? Parent.BackColor : Color.White);
+        using (GraphicsPath p = Gfx.Round(new Rectangle(0, 0, Width - 1, Height - 1), Radius))
+        using (SolidBrush b = new SolidBrush(BackColor)) using (Pen pen = new Pen(foc ? Gfx.C("#111111") : Gfx.C("#CFCFCF"))) { g.FillPath(b, p); g.DrawPath(pen, p); }
+    }
+}
+
+public class FlatRenderer : ToolStripProfessionalRenderer {
+    protected override void OnRenderToolStripBorder(ToolStripRenderEventArgs e) { }
+    protected override void OnRenderToolStripBackground(ToolStripRenderEventArgs e) { e.Graphics.Clear(Color.White); }
+}
+
+public class PopList : Control {
+    RCombo owner; int hot = -1; public int RowH = 28;
+    public PopList(RCombo o) {
+        owner = o; Width = o.Width; Height = o.Items.Count * RowH + 8; Font = o.Font;
+        SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
+        Cursor = Cursors.Hand;
+    }
+    protected override void OnPaint(PaintEventArgs e) {
+        Graphics g = e.Graphics; g.SmoothingMode = SmoothingMode.AntiAlias; g.Clear(Color.White);
+        using (GraphicsPath p = Gfx.Round(new Rectangle(0, 0, Width - 1, Height - 1), 8)) using (Pen pen = new Pen(Gfx.C("#CFCFCF"))) g.DrawPath(pen, p);
+        using (Font bf = new Font("Segoe UI Semibold", Font.Size))
+        for (int i = 0; i < owner.Items.Count; i++) {
+            Rectangle r = new Rectangle(4, 4 + i * RowH, Width - 9, RowH);
+            if (i == hot) using (GraphicsPath hp = Gfx.Round(r, 6)) using (SolidBrush b = new SolidBrush(Gfx.C("#F0F0F0"))) g.FillPath(b, hp);
+            TextRenderer.DrawText(g, owner.Items[i], i == owner.SelectedIndex ? bf : Font, new Rectangle(r.X + 8, r.Y, r.Width - 12, r.Height), Gfx.C("#111111"),
+                TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
+        }
+    }
+    int Hit(Point p) { int i = (p.Y - 4) / RowH; return (p.Y >= 4 && i >= 0 && i < owner.Items.Count) ? i : -1; }
+    protected override void OnMouseMove(MouseEventArgs e) { int h = Hit(e.Location); if (h != hot) { hot = h; Invalidate(); } base.OnMouseMove(e); }
+    protected override void OnMouseLeave(EventArgs e) { hot = -1; Invalidate(); base.OnMouseLeave(e); }
+    protected override void OnMouseUp(MouseEventArgs e) { int h = Hit(e.Location); if (h >= 0) owner.Choose(h); base.OnMouseUp(e); }
+}
+
+// Rounded drop-down list. Mirrors the members the app logic uses on a ComboBox:
+// Items (Add / Clear / Count / indexer), SelectedIndex, SelectedItem.
+public class RCombo : Control {
+    public List<string> Items = new List<string>();
+    public string Placeholder = "";
+    int sel = -1; bool hot, open; DateTime closedAt = DateTime.MinValue; ToolStripDropDown dd;
+    public event EventHandler SelectedChanged;
+    public int SelectedIndex {
+        get { return (sel >= 0 && sel < Items.Count) ? sel : -1; }
+        set {
+            int old = sel;
+            if (value >= -1 && value < Items.Count) sel = value;
+            Invalidate();
+            if (old != sel && SelectedChanged != null) SelectedChanged(this, EventArgs.Empty);
+        }
+    }
+    public string SelectedItem { get { int i = SelectedIndex; return i >= 0 ? Items[i] : null; } }
+    public RCombo() {
+        SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw | ControlStyles.Selectable, true);
+        Cursor = Cursors.Hand; BackColor = Color.White;
+    }
+    public void Choose(int i) { SelectedIndex = i; if (dd != null) dd.Close(); }
+    void Open() {
+        if (open || Items.Count == 0 || (DateTime.Now - closedAt).TotalMilliseconds < 250) return;
+        PopList pl = new PopList(this);
+        dd = new ToolStripDropDown(); dd.Padding = Padding.Empty; dd.DropShadowEnabled = false; dd.AutoSize = false; dd.BackColor = Color.White; dd.Renderer = new FlatRenderer();
+        ToolStripControlHost h = new ToolStripControlHost(pl); h.Margin = Padding.Empty; h.Padding = Padding.Empty; h.AutoSize = false; h.Size = pl.Size;
+        dd.Items.Add(h); dd.Size = pl.Size;
+        dd.Opened += delegate { try { using (GraphicsPath p = Gfx.Round(new Rectangle(0, 0, dd.Width, dd.Height), 8)) dd.Region = new Region(p); } catch { } };
+        dd.Closed += delegate { open = false; closedAt = DateTime.Now; Invalidate(); };
+        open = true; Invalidate(); dd.Show(this, new Point(0, Height + 2));
+    }
+    protected override void OnMouseEnter(EventArgs e) { hot = true; Invalidate(); base.OnMouseEnter(e); }
+    protected override void OnMouseLeave(EventArgs e) { hot = false; Invalidate(); base.OnMouseLeave(e); }
+    protected override void OnMouseDown(MouseEventArgs e) { Focus(); Open(); base.OnMouseDown(e); }
+    protected override void OnGotFocus(EventArgs e) { Invalidate(); base.OnGotFocus(e); }
+    protected override void OnLostFocus(EventArgs e) { Invalidate(); base.OnLostFocus(e); }
+    protected override void OnEnabledChanged(EventArgs e) { Invalidate(); base.OnEnabledChanged(e); }
+    protected override bool IsInputKey(Keys k) { return k == Keys.Up || k == Keys.Down || base.IsInputKey(k); }
+    protected override void OnKeyDown(KeyEventArgs e) {
+        if (e.KeyCode == Keys.Down) SelectedIndex = SelectedIndex + 1; else if (e.KeyCode == Keys.Up && SelectedIndex > 0) SelectedIndex = SelectedIndex - 1;
+        else if (e.KeyCode == Keys.Space || e.KeyCode == Keys.F4) Open();
+        base.OnKeyDown(e);
+    }
+    protected override void OnPaint(PaintEventArgs e) {
+        Graphics g = e.Graphics; g.SmoothingMode = SmoothingMode.AntiAlias;
+        g.Clear(Parent != null ? Parent.BackColor : Color.White);
+        Color ink = Gfx.C("#111111");
+        bool on = Enabled;
+        using (GraphicsPath p = Gfx.Round(new Rectangle(0, 0, Width - 1, Height - 1), 8))
+        using (SolidBrush b = new SolidBrush(Color.White)) using (Pen pen = new Pen(on && (Focused || open || hot) ? ink : Gfx.C("#CFCFCF"))) { g.FillPath(b, p); g.DrawPath(pen, p); }
+        int i = SelectedIndex;
+        string t = i >= 0 ? Items[i] : Placeholder;
+        Color tc = !on ? Gfx.C("#A6A6A6") : (i >= 0 ? ink : Gfx.C("#8A8A8A"));
+        TextRenderer.DrawText(g, t, Font, new Rectangle(12, 0, Width - 40, Height), tc, TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
+        float cx = Width - 20, cy = Height / 2f;
+        using (Pen p = new Pen(Gfx.C("#6B6B6B"), 1.5f)) { p.StartCap = LineCap.Round; p.EndCap = LineCap.Round; g.DrawLines(p, new PointF[] { new PointF(cx - 4, cy - 2), new PointF(cx, cy + 2), new PointF(cx + 4, cy - 2) }); }
+    }
+}
+
+// ListView that shows a hint when it has no rows
+public class HList : ListView {
+    public string Empty = "";
+    public HList() { DoubleBuffered = true; }
+    protected override void WndProc(ref Message m) {
+        base.WndProc(ref m);
+        if (m.Msg == 0x000F && Items.Count == 0 && Empty.Length > 0) {
+            try {
+                using (Graphics g = Graphics.FromHwnd(Handle)) {
+                    Rectangle r = new Rectangle(24, 64, Math.Max(10, ClientSize.Width - 48), Math.Max(10, ClientSize.Height - 72));
+                    TextRenderer.DrawText(g, Empty, Font, r, Gfx.C("#6B6B6B"), TextFormatFlags.HorizontalCenter | TextFormatFlags.WordBreak | TextFormatFlags.NoPrefix);
+                }
+            } catch { }
+        }
+    }
+}
+
+public class NavRail : Control {
+    public string[] Items = new string[0];
+    public string Sub = "", Footer = "";
+    static Font Fit(string text, string face, float start, float min, int maxW) {
+        float s = start;
+        while (s > min && TextRenderer.MeasureText(text, new Font(face, s), new Size(int.MaxValue, 100), TextFormatFlags.NoPadding).Width > maxW) s -= 0.25f;
+        return new Font(face, s);
+    }
+    public int Selected = 0; int hot = -1;
+    public int Top0 = 104, ItemH = 46;
+    public event EventHandler SelectedChanged;
+    public void Pick(int i) { if (Selected != i) { Selected = i; Invalidate(); if (SelectedChanged != null) SelectedChanged(this, EventArgs.Empty); } }
+    public NavRail() {
+        SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
+        BackColor = Gfx.C("#FAFAFA"); Cursor = Cursors.Hand;
+    }
+    void Icon(Graphics g, int i, float cx, float cy, Color c) {
+        using (Pen p = new Pen(c, 1.6f)) {
+            p.StartCap = LineCap.Round; p.EndCap = LineCap.Round; p.LineJoin = LineJoin.Round;
+            switch (i) {
+                case 0:
+                    g.DrawEllipse(p, cx - 9, cy - 9, 18, 18);
+                    g.DrawLines(p, new PointF[] { new PointF(cx - 4.5f, cy), new PointF(cx - 1, cy + 3.5f), new PointF(cx + 5, cy - 3.5f) }); break;
+                case 1:
+                    using (GraphicsPath rp = Gfx.Round(new Rectangle((int)cx - 9, (int)cy - 9, 18, 18), 4)) g.DrawPath(p, rp);
+                    g.DrawLine(p, cx - 4.5f, cy, cx + 4.5f, cy); g.DrawLine(p, cx, cy - 4.5f, cx, cy + 4.5f); break;
+                case 2:
+                    g.DrawPolygon(p, new PointF[] { new PointF(cx, cy - 9), new PointF(cx + 9, cy - 4.5f), new PointF(cx, cy), new PointF(cx - 9, cy - 4.5f) });
+                    g.DrawLines(p, new PointF[] { new PointF(cx - 9, cy), new PointF(cx, cy + 4.5f), new PointF(cx + 9, cy) });
+                    g.DrawLines(p, new PointF[] { new PointF(cx - 9, cy + 4.5f), new PointF(cx, cy + 9), new PointF(cx + 9, cy + 4.5f) }); break;
+                case 3:
+                    g.DrawArc(p, cx - 8, cy - 7, 16, 16, -55, 290);
+                    g.DrawLine(p, cx, cy - 10, cx, cy - 1); break;
+                default:
+                    g.DrawArc(p, cx - 8, cy - 8, 16, 16, 150, 300);
+                    g.DrawLines(p, new PointF[] { new PointF(cx, cy - 4.5f), new PointF(cx, cy), new PointF(cx + 3.5f, cy + 2) });
+                    g.DrawLines(p, new PointF[] { new PointF(cx - 11, cy - 1), new PointF(cx - 7.5f, cy + 3.5f), new PointF(cx - 4, cy - 1) }); break;
+            }
+        }
+    }
+    protected override void OnPaint(PaintEventArgs e) {
+        Graphics g = e.Graphics; g.SmoothingMode = SmoothingMode.AntiAlias; g.Clear(BackColor);
+        Color ink = Gfx.C("#111111"), grey = Gfx.C("#6B6B6B"), hair = Gfx.C("#DDDDDD");
+        bool on = Enabled;
+        if (!on) { ink = Gfx.C("#8A8A8A"); }
+        using (Pen hp = new Pen(hair)) g.DrawLine(hp, Width - 1, 0, Width - 1, Height);
+        using (GraphicsPath lp = Gfx.Round(new Rectangle(24, 28, 36, 36), 10)) using (SolidBrush lb = new SolidBrush(ink)) g.FillPath(lb, lp);
+        using (SolidBrush wb = new SolidBrush(Color.White)) {
+            for (int k = 0; k < 3; k++) using (GraphicsPath bp = Gfx.Round(new Rectangle(31, 36 + k * 8, 22, 4), 2)) g.FillPath(wb, bp);
+        }
+        int tw = Width - 70 - 12;
+        using (Font f1 = Fit("VHDX Boot Manager", "Segoe UI Semibold", 11f, 8.5f, tw)) TextRenderer.DrawText(g, "VHDX Boot Manager", f1, new Rectangle(70, 28, tw, 20), ink, TextFormatFlags.NoPadding | TextFormatFlags.VerticalCenter);
+        using (Font f2 = Fit(Sub, "Segoe UI Semilight", 9f, 7.5f, tw)) TextRenderer.DrawText(g, Sub, f2, new Rectangle(70, 48, tw, 16), grey, TextFormatFlags.NoPadding | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+        using (Pen hp = new Pen(hair)) g.DrawLine(hp, 20, 84, Width - 21, 84);
+        using (Font f = new Font("Segoe UI Semilight", 10.5f)) using (Font fs = new Font("Segoe UI Semibold", 10f)) {
+            for (int i = 0; i < Items.Length; i++) {
+                int y = Top0 + i * ItemH; bool sel = (i == Selected);
+                Rectangle r = new Rectangle(16, y + 3, Width - 33, ItemH - 6);
+                if (sel) using (GraphicsPath sp = Gfx.Round(r, 8)) { using (SolidBrush sb = new SolidBrush(Color.White)) g.FillPath(sb, sp); using (Pen sq = new Pen(hair)) g.DrawPath(sq, sp); }
+                else if (i == hot && on) using (GraphicsPath hpth = Gfx.Round(r, 8)) using (SolidBrush hb = new SolidBrush(Gfx.C("#EFEFEF"))) g.FillPath(hb, hpth);
+                if (sel) using (GraphicsPath ap = Gfx.Round(new Rectangle(5, y + ItemH / 2 - 10, 4, 20), 2)) using (SolidBrush ab = new SolidBrush(on ? Gfx.C("#FF4F00") : Gfx.C("#F7C2AA"))) g.FillPath(ab, ap);
+                Color c = sel ? ink : (on ? Gfx.C("#555555") : Gfx.C("#A0A0A0"));
+                Icon(g, i, 40, y + ItemH / 2f, sel ? ink : (on ? grey : Gfx.C("#A0A0A0")));
+                TextRenderer.DrawText(g, Items[i], sel ? fs : f, new Rectangle(64, y, Width - 70, ItemH), c, TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix | TextFormatFlags.VerticalCenter);
+            }
+        }
+        using (Font f3 = new Font("Segoe UI Semilight", 8.5f)) TextRenderer.DrawText(g, Footer, f3, new Rectangle(24, Height - 36, Width - 40, 20), grey, TextFormatFlags.NoPadding | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+    }
+    int Hit(Point p) { int i = (p.Y - Top0) / ItemH; return (p.Y >= Top0 && i >= 0 && i < Items.Length) ? i : -1; }
+    protected override void OnMouseMove(MouseEventArgs e) { int h = Hit(e.Location); if (h != hot) { hot = h; Invalidate(); } base.OnMouseMove(e); }
+    protected override void OnMouseLeave(EventArgs e) { hot = -1; Invalidate(); base.OnMouseLeave(e); }
+    protected override void OnMouseDown(MouseEventArgs e) { int h = Hit(e.Location); if (h >= 0) Pick(h); base.OnMouseDown(e); }
+    protected override void OnEnabledChanged(EventArgs e) { Invalidate(); base.OnEnabledChanged(e); }
+}
+'@
+Add-Type -ReferencedAssemblies System.Windows.Forms, System.Drawing -TypeDefinition $cs -Language CSharp
+Add-Type -Namespace Win -Name Dwm -MemberDefinition '[System.Runtime.InteropServices.DllImport("dwmapi.dll")] public static extern int DwmSetWindowAttribute(System.IntPtr h, int a, ref int v, int s);'
+Add-Type -Namespace Win -Name U32 -MemberDefinition '[System.Runtime.InteropServices.DllImport("user32.dll")] public static extern bool PrintWindow(System.IntPtr h, System.IntPtr hdc, uint flags);'
+
+function C($hex) { [System.Drawing.ColorTranslator]::FromHtml($hex) }
+function Pt($x, $y) { New-Object System.Drawing.Point($x, $y) }
+function Sz($w, $h) { New-Object System.Drawing.Size($w, $h) }
+function Pad($l, $t, $r, $b) { New-Object System.Windows.Forms.Padding($l, $t, $r, $b) }
+
+$script:cInk = C '#111111'; $script:cGrey = C '#6B6B6B'; $script:cHair = C '#DDDDDD'; $script:cWhite = [System.Drawing.Color]::White; $script:cAccent = C '#E04500'
+$script:fBody = New-Object System.Drawing.Font('Segoe UI Semilight', 10)
+$script:fBold = New-Object System.Drawing.Font('Segoe UI Semibold', 10)
+$script:fItal = New-Object System.Drawing.Font('Segoe UI Semilight', 10, [System.Drawing.FontStyle]::Italic)
+$script:fSmall = New-Object System.Drawing.Font('Segoe UI Semilight', 9)
+$script:fHdr = New-Object System.Drawing.Font('Segoe UI Semibold', 8)
+$script:fBtn = New-Object System.Drawing.Font('Segoe UI', 9)
+$script:fBtnB = New-Object System.Drawing.Font('Segoe UI Semibold', 9)
+$script:fMono = New-Object System.Drawing.Font('Consolas', 9.5)
+$script:bWhite = New-Object System.Drawing.SolidBrush($script:cWhite)
+$script:bSel = New-Object System.Drawing.SolidBrush((C '#EBEBEB'))
+$script:bRunRow = New-Object System.Drawing.SolidBrush((C '#F6F6F6'))
+$script:penHair = New-Object System.Drawing.Pen($script:cHair)
+$script:penHair2 = New-Object System.Drawing.Pen((C '#EAEAEA'))
+
+# ---- control factories ----
+# Rounded button; same click behaviour as before: Invoke-Action <button text> <action>
+function New-Btn([string]$Text, [string]$Kind, [string]$HelpText, [scriptblock]$Action, [int]$W = 0, [int]$H = 32) {
+  $b = New-Object RBtn
+  $b.Text = $Text; $b.Kind = $Kind; $b.BackColor = $script:cWhite
+  $b.Font = if ($Kind -eq 'primary') { $script:fBtnB } else { $script:fBtn }
+  if ($W -le 0) { $W = [System.Windows.Forms.TextRenderer]::MeasureText($Text, $b.Font).Width + 28 }
+  $b.Size = Sz $W $H; $b.Margin = Pad 0 0 8 0
   Add-Help $b $Text $HelpText
   $b.Tag = @{ Name = $Text; Action = $Action }
   $b.Add_Click({ $t = $this.Tag; Invoke-Action $t.Name $t.Action })
   return $b
 }
 
-function New-Lbl($Parent, [string]$Text, [int]$X, [int]$Y, [int]$W = 110, [int]$H = 20) {
+function New-Label([string]$Text, $Font = $script:fBody, $Color = $script:cGrey) {
   $l = New-Object System.Windows.Forms.Label
-  $l.Text = $Text; $l.Location = New-Object System.Drawing.Point($X, $Y); $l.Size = New-Object System.Drawing.Size($W, $H)
-  $Parent.Controls.Add($l)
+  $l.Text = $Text; $l.Font = $Font; $l.ForeColor = $Color; $l.BackColor = $script:cWhite; $l.AutoSize = $false; $l.UseMnemonic = $false
+  return $l
+}
+# show the vertical scrollbar of a read-only text box only when the text does not fit
+function Set-AutoScroll($tb) {
+  $upd = {
+    param($s, $e)
+    $w = [Math]::Max(50, $s.ClientSize.Width - 17)
+    $need = ([System.Windows.Forms.TextRenderer]::MeasureText($s.Text + ' ', $s.Font, (Sz $w 0), [System.Windows.Forms.TextFormatFlags]'WordBreak,NoPadding')).Height -gt $s.ClientSize.Height
+    $want = if ($need) { 'Vertical' } else { 'None' }
+    if ($s.ScrollBars -ne $want) { $s.ScrollBars = $want }
+  }
+  $tb.Add_TextChanged($upd); $tb.Add_Resize($upd)
+}
+
+function New-Host($inner, [int]$mode, [string]$Title, [string]$HelpText) {
+  $inner.Font = $script:fBody; $inner.ForeColor = $script:cInk; $inner.BackColor = $script:cWhite
+  $inner.BorderStyle = 'None'
+  $h = New-Object RField $inner, $mode
+  $h.Dock = 'Fill'; $h.Margin = Pad 0 4 14 4
+  if ($HelpText) { Add-Help $inner $Title $HelpText; Add-Help $h $Title $HelpText }
+  return $h
+}
+function New-Text([string]$Text, [string]$Title, [string]$HelpText) {
+  $t = New-Object System.Windows.Forms.TextBox; $t.Text = $Text
+  return (New-Host $t 0 $Title $HelpText)
+}
+function New-Num($min, $max, $val, [int]$w, [string]$Title, [string]$HelpText) {
+  $n = New-Object System.Windows.Forms.NumericUpDown; $n.Minimum = $min; $n.Maximum = $max; $n.Value = $val
+  $h = New-Host $n 2 $Title $HelpText; $h.Dock = 'None'; $h.Anchor = 'Left'; $h.Size = Sz $w 32; $h.Margin = Pad 0 4 8 4
+  return $h
+}
+function New-Multi($font = $script:fMono) {
+  $t = New-Object System.Windows.Forms.TextBox
+  $t.Multiline = $true; $t.ReadOnly = $true; $t.ScrollBars = 'Vertical'; $t.WordWrap = $true
+  $h = New-Host $t 1 '' ''; $t.Font = $font; $h.Margin = Pad 0 0 0 0
+  [Gfx]::Explorer($t); Set-AutoScroll $t
+  return $h
+}
+function New-Combo([string]$Title, [string]$HelpText, [string]$Placeholder) {
+  $c = New-Object RCombo
+  $c.Font = $script:fBody; $c.Dock = 'Fill'; $c.Margin = Pad 0 4 14 4; $c.Placeholder = $Placeholder
+  Add-Help $c $Title $HelpText
+  return $c
+}
+function New-Check([string]$Text, [bool]$Checked, [string]$Title, [string]$HelpText) {
+  $c = New-Object RCheck
+  $c.Text = $Text; $c.Checked = $Checked; $c.Font = $script:fBody; $c.ForeColor = $script:cInk
+  $c.BackColor = $script:cWhite; $c.Margin = Pad 0 2 0 2; $c.Dock = 'Fill'
+  Add-Help $c $Title $HelpText
+  return $c
+}
+function New-Page { $p = New-Object System.Windows.Forms.Panel; $p.Dock = 'Fill'; $p.BackColor = $script:cWhite; $p.Padding = Pad 0 16 0 0; $p.Visible = $false; return $p }
+function New-Flow {
+  $f = New-Object System.Windows.Forms.FlowLayoutPanel
+  $f.BackColor = $script:cWhite; $f.WrapContents = $true; $f.FlowDirection = 'LeftToRight'
+  return $f
+}
+function New-ListCard($lv) {
+  $c = New-Object RCard; $c.Dock = 'Fill'; $c.Padding = Pad 8 6 8 8; $c.Radius = 12
+  $c.Controls.Add($lv); return $c
+}
+function Grp([string]$text) {
+  $l = New-Label $text.ToUpper() $script:fHdr $script:cGrey; $l.Size = Sz 200 20; $l.TextAlign = 'BottomLeft'
   return $l
 }
 
+# ---- owner-drawn lists (rounded selection bars, pills, hairlines) ----
+$script:flagsL = [System.Windows.Forms.TextFormatFlags]'VerticalCenter,Left,EndEllipsis,NoPrefix,SingleLine'
+function Draw-Pill($g, [int]$x, [int]$cy, [string]$text, $fill, $fore, $border) {
+  $f = $script:fHdr
+  $w = [System.Windows.Forms.TextRenderer]::MeasureText($text, $f).Width + 10; $h = 20
+  $r = New-Object System.Drawing.Rectangle($x, ($cy - 10), $w, $h)
+  $g.SmoothingMode = 'AntiAlias'
+  $p = [Gfx]::Round($r, 10)
+  if ($fill) { $br = New-Object System.Drawing.SolidBrush($fill); $g.FillPath($br, $p); $br.Dispose() }
+  if ($border) { $pn = New-Object System.Drawing.Pen($border); $g.DrawPath($pn, $p); $pn.Dispose() }
+  $p.Dispose()
+  [System.Windows.Forms.TextRenderer]::DrawText($g, $text, $f, $r, $fore, [System.Windows.Forms.TextFormatFlags]'HorizontalCenter,VerticalCenter,NoPadding,NoPrefix')
+  return ($w + 6)
+}
+$script:drawHeader = {
+  param($s, $e)
+  $g = $e.Graphics
+  $g.FillRectangle($script:bWhite, $e.Bounds)
+  $r = New-Object System.Drawing.Rectangle(($e.Bounds.X + 12), $e.Bounds.Y, ([Math]::Max(1, $e.Bounds.Width - 12)), ($e.Bounds.Height - 1))
+  [System.Windows.Forms.TextRenderer]::DrawText($g, $e.Header.Text.ToUpper(), $script:fHdr, $r, $script:cGrey, $script:flagsL)
+  $g.DrawLine($script:penHair, ($e.Bounds.Left + $(if ($e.ColumnIndex -eq 0) { 4 } else { 0 })), $e.Bounds.Bottom - 1, ($e.Bounds.Right - $(if ($e.ColumnIndex -eq $s.Columns.Count - 1) { 4 } else { 0 })), $e.Bounds.Bottom - 1)
+}
+$script:drawCell = {
+  param($s, $e)
+  $g = $e.Graphics; $it = $e.Item; $b = $e.Bounds; $ci = $e.ColumnIndex
+  $tag = $it.Tag; $text = [string]$e.SubItem.Text
+  $kind = ''
+  switch ($s.Name) {
+    'EnvList' { if ($tag) { if ($tag.IsRunning) { $kind = 'running' } elseif ($tag.Type -eq 'Base') { $kind = 'base' } } }
+    'BootList' { if ($it.SubItems.Count -gt 2 -and $it.SubItems[2].Text -match 'running') { $kind = 'running' } elseif ($it.Font.Bold) { $kind = 'defrow' } }
+    'BackupList' { if ($tag -and ([string]$tag.Reason) -match '^manual') { $kind = 'strong' } }
+  }
+  $g.SmoothingMode = 'AntiAlias'
+  $g.FillRectangle($script:bWhite, $b)
+  $fb = $null
+  if ($it.Selected) { $fb = $script:bSel } elseif ($kind -eq 'running') { $fb = $script:bRunRow }
+  $first = ($ci -eq 0); $last = ($ci -eq ($s.Columns.Count - 1))
+  if ($fb) {
+    $x1 = if ($first) { $b.X + 3 } else { $b.X - 20 }
+    $x2 = if ($last) { $b.Right - 3 } else { $b.Right + 20 }
+    $rc = New-Object System.Drawing.Rectangle($x1, ($b.Y + 2), ($x2 - $x1), ($b.Height - 5))
+    $g.SetClip($b)
+    $p = [Gfx]::Round($rc, 8); $g.FillPath($fb, $p); $p.Dispose()
+    $g.ResetClip()
+  }
+  else {
+    $g.DrawLine($script:penHair2, ($b.Left + $(if ($first) { 4 } else { 0 })), $b.Bottom - 1, ($b.Right - $(if ($last) { 4 } else { 0 })), $b.Bottom - 1)
+  }
+  $cy = $b.Y + [int](($b.Height - 1) / 2); $x0 = $b.X + 12
+  $g.SetClip($b)
+  if ($s.Name -eq 'EnvList') {
+    if ($ci -eq 1 -and $text -eq 'Base') { [void](Draw-Pill $g $x0 $cy 'BASE' $null $script:cInk $script:cInk); $g.ResetClip(); return }
+    if ($ci -eq 6 -and $text -eq 'RUNNING') { [void](Draw-Pill $g $x0 $cy 'RUNNING' $script:cInk $script:cWhite $null); $g.ResetClip(); return }
+    if ($ci -eq 6 -and $text -eq 'locked') { [void](Draw-Pill $g $x0 $cy 'LOCKED' $null $script:cGrey (C '#BDBDBD')); $g.ResetClip(); return }
+  }
+  if ($s.Name -eq 'BootList' -and $ci -eq 2 -and $text) {
+    $x = $x0
+    foreach ($tok in ($text -split ',\s*')) {
+      if ($tok -eq 'running') { $x += (Draw-Pill $g $x $cy 'RUNNING' $script:cInk $script:cWhite $null) }
+      elseif ($tok -eq 'default') { $x += (Draw-Pill $g $x $cy 'DEFAULT' $null $script:cInk $script:cInk) }
+    }
+    $g.ResetClip(); return
+  }
+  $font = $script:fBody; $col = $script:cInk
+  if ($kind -eq 'base') { $font = $script:fItal; $col = $script:cGrey }
+  if ($kind -eq 'running' -and $first) { $font = $script:fBold }
+  if ($kind -eq 'strong') { $font = $script:fBold; $col = $script:cAccent }
+  if ($kind -eq 'defrow' -and $first) { $font = $script:fBold }
+  if ($s.Name -eq 'BootList' -and $ci -eq 3) { $font = $script:fSmall; $col = $script:cGrey }
+  $r = New-Object System.Drawing.Rectangle($x0, $b.Y, ([Math]::Max(1, $b.Width - 14)), ($b.Height - 1))
+  [System.Windows.Forms.TextRenderer]::DrawText($g, $text, $font, $r, $col, $script:flagsL)
+  $g.ResetClip()
+}
+function New-List([string]$Name, $cols, [string]$EmptyText, [bool]$Multi = $false) {
+  $lv = New-Object HList
+  $lv.Name = $Name; $lv.Empty = $EmptyText
+  $lv.View = 'Details'; $lv.FullRowSelect = $true; $lv.MultiSelect = $Multi; $lv.HideSelection = $false
+  $lv.BorderStyle = 'None'; $lv.BackColor = $script:cWhite; $lv.Font = $script:fBody; $lv.OwnerDraw = $true; $lv.Dock = 'Fill'
+  $il = New-Object System.Windows.Forms.ImageList; $il.ImageSize = Sz 1 30; $lv.SmallImageList = $il
+  foreach ($c in $cols) { [void]$lv.Columns.Add($c[0], $c[1]) }
+  $lv.Add_DrawColumnHeader($script:drawHeader); $lv.Add_DrawSubItem($script:drawCell); $lv.Add_DrawItem({ param($s, $e) })
+  $lv.Tag = @($cols | ForEach-Object { $_[1] })
+  $lv.Add_Resize({
+      param($s, $e)
+      $w = $s.ClientSize.Width - 4; if ($w -lt 200) { return }
+      $t = 0; foreach ($x in $s.Tag) { $t += $x }
+      $n = $s.Columns.Count - 1; $used = 0
+      for ($i = 0; $i -lt $n; $i++) { $cw = [int]($w * $s.Tag[$i] / $t); $s.Columns[$i].Width = $cw; $used += $cw }
+      $s.Columns[$n].Width = $w - $used; $s.Invalidate()
+    })
+  return $lv
+}
+
+# ---- window ----
 $Form = New-Object System.Windows.Forms.Form
 $Form.Text = 'VHDX Boot Manager - multiple bare-metal Windows environments'
-$Form.ClientSize = New-Object System.Drawing.Size(1040, 770)
 $Form.StartPosition = 'CenterScreen'
 $Form.FormBorderStyle = 'Sizable'
 $Form.MaximizeBox = $true
 $Form.ClientSize = New-Object System.Drawing.Size(800, 680)
 $Form.MinimumSize = $Form.Size   # smallest allowed window
-$Form.ClientSize = New-Object System.Drawing.Size(1040, 770)
-$Form.Font = New-Object System.Drawing.Font('Segoe UI', 9)
+$Form.ClientSize = New-Object System.Drawing.Size(1120, 770)
+$Form.BackColor = $script:cWhite; $Form.ForeColor = $script:cInk
+$Form.Font = $script:fBody
+$Form.KeyPreview = $true
 $script:Form = $Form
 
 # Window size / position is remembered between runs
@@ -1174,301 +1883,229 @@ function Save-WindowState {
   catch {}
 }
 
-# ---- top bar: VHD folder ----
-$TopPanel = New-Object System.Windows.Forms.Panel
-$TopPanel.Location = New-Object System.Drawing.Point(10, 8)
-$TopPanel.Size = New-Object System.Drawing.Size(1020, 34)
-$TopPanel.Anchor = 'Top, Left, Right'
-$Form.Controls.Add($TopPanel)
-$script:TopPanel = $TopPanel
-
-[void](New-Lbl $TopPanel 'VHD folder:' 0 8 80)
-$TxtFolder = New-Object System.Windows.Forms.TextBox
-$TxtFolder.Location = New-Object System.Drawing.Point(82, 5)
-$TxtFolder.Size = New-Object System.Drawing.Size(520, 24)
-$TxtFolder.Anchor = 'Top, Left, Right'
-$TopPanel.Controls.Add($TxtFolder)
-$script:TxtFolder = $TxtFolder
-Add-Help $TxtFolder 'VHD folder' 'Where all environment files (.vhdx), snapshots, boot-config backups and the log are kept. Must be on an NTFS drive that is NOT BitLocker-encrypted. Default: C:\VHD. Inside a VHDX-booted Windows the physical drive has a different letter (often D:), and the tool detects that automatically.'
-$TxtFolder.Add_Leave({ try { Update-All } catch { Write-Log "ERROR: $($_.Exception.Message)" } })
-
-$b1 = New-Btn $TopPanel 'Browse...' 610 2 90 'Choose a different folder to store the VHDX files in.' {
-  $d = New-Object System.Windows.Forms.FolderBrowserDialog
-  $d.Description = 'Folder for VHDX files (NTFS, not BitLocker-encrypted)'
-  if ($d.ShowDialog($script:Form) -eq [System.Windows.Forms.DialogResult]::OK) { $script:TxtFolder.Text = $d.SelectedPath; Update-All }
-} 30
-$b2 = New-Btn $TopPanel 'Open in Explorer' 705 2 130 'Opens the VHD folder in File Explorer.' { Start-Process explorer.exe (Get-VhdFolder) } 30
-$b3 = New-Btn $TopPanel 'Refresh everything' 840 2 178 'Re-reads the VHDX files and the boot menu. Use this after changing things outside the tool.' { Update-All; Write-Log 'Refreshed.' } 30
-foreach ($b in $b1, $b2, $b3) { $b.Anchor = 'Top, Right' }
-
-# ---- tabs ----
-$Tabs = New-Object System.Windows.Forms.TabControl
-$Tabs.Location = New-Object System.Drawing.Point(10, 48)
-$Tabs.Size = New-Object System.Drawing.Size(1020, 420)
-$Tabs.Anchor = 'Top, Bottom, Left, Right'
-$Form.Controls.Add($Tabs)
+# ---- page host (replaces the tab control; the sidebar picks the page) ----
+$Tabs = New-Object System.Windows.Forms.Panel; $Tabs.Dock = 'Fill'; $Tabs.BackColor = $script:cWhite
 $script:Tabs = $Tabs
-$TabCheck = New-Object System.Windows.Forms.TabPage; $TabCheck.Text = '  1. Check system  '
-$TabBase = New-Object System.Windows.Forms.TabPage; $TabBase.Text = '  2. Create base  '
-$TabEnv = New-Object System.Windows.Forms.TabPage; $TabEnv.Text = '  3. Environments  '
-$TabBoot = New-Object System.Windows.Forms.TabPage; $TabBoot.Text = '  4. Boot menu  '
-$TabBackup = New-Object System.Windows.Forms.TabPage; $TabBackup.Text = '  5. Backup / restore  '
-$Tabs.TabPages.AddRange(@($TabCheck, $TabBase, $TabEnv, $TabBoot, $TabBackup))
-# Give the pages their real size NOW: anchors are calculated from the parent's size when a control is
-# added, and a page that has not been shown yet is tiny, which pushed anchored buttons out of view.
-foreach ($tp in $TabCheck, $TabBase, $TabEnv, $TabBoot, $TabBackup) { $tp.Size = New-Object System.Drawing.Size(1012, 390) }
+$pCheck = New-Page; $pBase = New-Page; $pEnv = New-Page; $pBoot = New-Page; $pBackup = New-Page
+$pageList = @($pCheck, $pBase, $pEnv, $pBoot, $pBackup)
+foreach ($p in $pageList) { $Tabs.Controls.Add($p) }
 
-# ---- description panel ----
-$DescGroup = New-Object System.Windows.Forms.GroupBox
-$DescGroup.Text = 'What does this do?'
-$DescGroup.Location = New-Object System.Drawing.Point(10, 474)
-$DescGroup.Size = New-Object System.Drawing.Size(1020, 108)
-$DescGroup.Anchor = 'Bottom, Left, Right'
-$Form.Controls.Add($DescGroup)
-$DescTitle = New-Object System.Windows.Forms.Label
-$DescTitle.Location = New-Object System.Drawing.Point(10, 20)
-$DescTitle.Size = New-Object System.Drawing.Size(1000, 20)
-$DescTitle.Anchor = 'Top, Left, Right'
-$DescTitle.Font = New-Object System.Drawing.Font('Segoe UI', 9.5, [System.Drawing.FontStyle]::Bold)
-$DescGroup.Controls.Add($DescTitle)
-$DescText = New-Object System.Windows.Forms.TextBox
-$DescText.Location = New-Object System.Drawing.Point(10, 42)
-$DescText.Size = New-Object System.Drawing.Size(1000, 60)
-$DescText.Anchor = 'Top, Bottom, Left, Right'
-$DescText.Multiline = $true
-$DescText.ReadOnly = $true
-$DescText.BorderStyle = 'None'
-$DescText.BackColor = $DescGroup.BackColor
-$DescText.ScrollBars = 'Vertical'
-$DescGroup.Controls.Add($DescText)
-$script:DescTitle = $DescTitle; $script:DescText = $DescText
-Show-HelpText 'Hover over any button' 'Move the mouse over a button or field and its explanation appears here. Work through the tabs from left to right: check the PC, create a base Windows, then create environments from it.'
+# ======================= PAGE 1: CHECK =======================
+$CheckOutHost = New-Multi (New-Object System.Drawing.Font('Consolas', 9.5)); $CheckOutHost.Dock = 'Fill'
+$CheckOut = $CheckOutHost.Inner; $script:CheckOut = $CheckOut
+$top1 = New-Object System.Windows.Forms.Panel; $top1.Dock = 'Top'; $top1.Height = 70; $top1.BackColor = $script:cWhite
+$bRun = New-Btn 'Run system check' 'primary' 'Checks everything needed before you start: your Windows edition, UEFI firmware, whether the VHD folder is on an NTFS drive with enough free space, whether that drive is BitLocker/Device-Encryption encrypted (native VHDX boot fails on encrypted drives), whether you are currently booted from a VHDX, and what is in the boot menu. It only reads information and does not change anything.' { Invoke-SystemCheck } 170 36
+$bRun.Location = Pt 0 0; $top1.Controls.Add($bRun)
+$chkInfo = New-Label 'Start here. If anything shows FAIL, fix it before creating a base (most often: the drive holding the VHD folder is encrypted - pick another drive or turn off Device Encryption in Settings > Privacy & security).' $script:fSmall $script:cGrey
+$chkInfo.Location = Pt 190 0; $chkInfo.Size = Sz 400 64
+$top1.Controls.Add($chkInfo); $script:chkInfo = $chkInfo
+$top1.Add_Resize({ param($s, $e) $script:chkInfo.Width = [Math]::Max(100, $s.ClientSize.Width - 190) })
+$pCheck.Controls.Add($CheckOutHost); $pCheck.Controls.Add($top1); $CheckOutHost.BringToFront()
 
-# ---- status + log ----
-$StatusLbl = New-Object System.Windows.Forms.Label
-$StatusLbl.Location = New-Object System.Drawing.Point(10, 586)
-$StatusLbl.Size = New-Object System.Drawing.Size(1020, 18)
-$StatusLbl.Anchor = 'Bottom, Left, Right'
-$StatusLbl.ForeColor = [System.Drawing.Color]::DarkBlue
-$StatusLbl.Font = New-Object System.Drawing.Font('Consolas', 8.5)
-$Form.Controls.Add($StatusLbl)
-$script:StatusLbl = $StatusLbl
+# ======================= PAGE 2: CREATE BASE =======================
+$tl = New-Object System.Windows.Forms.TableLayoutPanel
+$tl.Dock = 'Top'; $tl.AutoSize = $true; $tl.BackColor = $script:cWhite; $tl.ColumnCount = 4; $tl.GrowStyle = 'FixedSize'
+[void]$tl.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle('Absolute', 124)))
+[void]$tl.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle('Percent', 100)))
+[void]$tl.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle('AutoSize')))
+[void]$tl.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle('AutoSize')))
+$heights = 36, 36, 36, 36, 36, 30, 30, 36, 30, 62
+$tl.RowCount = $heights.Count
+foreach ($h in $heights) { [void]$tl.RowStyles.Add((New-Object System.Windows.Forms.RowStyle('Absolute', $h))) }
+function Lbl($t) { $l = New-Label $t $script:fBody $script:cGrey; $l.Dock = 'Fill'; $l.TextAlign = 'MiddleLeft'; $l.Margin = Pad 0 0 0 0; return $l }
+function Put($c, $col, $row, $span = 1) { $tl.Controls.Add($c, $col, $row); if ($span -gt 1) { $tl.SetColumnSpan($c, $span) } }
 
-$LogBox = New-Object System.Windows.Forms.TextBox
-$LogBox.Location = New-Object System.Drawing.Point(10, 606)
-$LogBox.Size = New-Object System.Drawing.Size(1020, 156)
-$LogBox.Anchor = 'Bottom, Left, Right'
-$LogBox.Multiline = $true
-$LogBox.ReadOnly = $true
-$LogBox.ScrollBars = 'Vertical'
-$LogBox.Font = New-Object System.Drawing.Font('Consolas', 8.5)
-$LogBox.BackColor = [System.Drawing.Color]::White
-$Form.Controls.Add($LogBox)
-$script:LogBox = $LogBox
-
-# ======================= TAB 1: CHECK =======================
-[void](New-Btn $TabCheck 'Run system check' 10 10 200 'Checks everything needed before you start: your Windows edition, UEFI firmware, whether the VHD folder is on an NTFS drive with enough free space, whether that drive is BitLocker/Device-Encryption encrypted (native VHDX boot fails on encrypted drives), whether you are currently booted from a VHDX, and what is in the boot menu. It only reads information and does not change anything.' { Invoke-SystemCheck } 34)
-$chkInfo = New-Lbl $TabCheck 'Start here. If anything shows FAIL, fix it before creating a base (most often: the drive holding the VHD folder is encrypted - pick another drive or turn off Device Encryption in Settings > Privacy & security).' 230 10 770 40
-$chkInfo.Anchor = 'Top, Left, Right'
-$CheckOut = New-Object System.Windows.Forms.TextBox
-$CheckOut.Location = New-Object System.Drawing.Point(10, 55)
-$CheckOut.Size = New-Object System.Drawing.Size(990, 325)
-$CheckOut.Anchor = 'Top, Bottom, Left, Right'
-$CheckOut.Multiline = $true
-$CheckOut.ReadOnly = $true
-$CheckOut.ScrollBars = 'Vertical'
-$CheckOut.Font = New-Object System.Drawing.Font('Consolas', 9)
-$CheckOut.BackColor = [System.Drawing.Color]::White
-$TabCheck.Controls.Add($CheckOut)
-$script:CheckOut = $CheckOut
-
-# ======================= TAB 2: CREATE BASE =======================
-[void](New-Lbl $TabBase 'Windows ISO:' 10 18)
-$TxtIso = New-Object System.Windows.Forms.TextBox
-$TxtIso.Location = New-Object System.Drawing.Point(125, 15); $TxtIso.Size = New-Object System.Drawing.Size(380, 24)
-$TabBase.Controls.Add($TxtIso); $script:TxtIso = $TxtIso
-Add-Help $TxtIso 'Windows ISO' 'The Windows installation ISO to build the base from. Download the official Windows 11 ISO from microsoft.com/software-download/windows11.'
-[void](New-Btn $TabBase 'Browse...' 510 12 100 'Pick the Windows ISO file. After you choose it, its editions are read automatically.' {
+$hIso = New-Text '' 'Windows ISO' 'The Windows installation ISO to build the base from. Download the official Windows 11 ISO from microsoft.com/software-download/windows11.'
+$TxtIso = $hIso.Inner; $script:TxtIso = $TxtIso
+$btnBrowseIso = New-Btn 'Browse...' 'ghost' 'Pick the Windows ISO file. After you choose it, its editions are read automatically.' {
     $d = New-Object System.Windows.Forms.OpenFileDialog
     $d.Filter = 'Windows ISO (*.iso)|*.iso'
     if ($d.ShowDialog($script:Form) -eq [System.Windows.Forms.DialogResult]::OK) { $script:TxtIso.Text = $d.FileName; Read-Editions }
-  } 28)
+  } 100 32
+$btnBrowseIso.Anchor = 'Left'; $btnBrowseIso.Margin = Pad 0 0 8 0
+$btnRead = New-Btn 'Read editions' 'ghost' 'Mounts the ISO and lists the Windows editions inside it (the same as "dism /Get-WimInfo" in the guide). Pro is selected automatically.' { Read-Editions } 124 32
+$btnRead.Anchor = 'Left'; $btnRead.Margin = Pad 0 0 0 0
+Put (Lbl 'Windows ISO') 0 0; Put $hIso 1 0; Put $btnBrowseIso 2 0; Put $btnRead 3 0
 
-[void](New-Lbl $TabBase 'Edition:' 10 53)
-$CmbEdition = New-Object System.Windows.Forms.ComboBox
-$CmbEdition.Location = New-Object System.Drawing.Point(125, 50); $CmbEdition.Size = New-Object System.Drawing.Size(380, 24)
-$CmbEdition.DropDownStyle = 'DropDownList'
-$TabBase.Controls.Add($CmbEdition); $script:CmbEdition = $CmbEdition
-Add-Help $CmbEdition 'Edition' 'Which Windows edition to install into the base. Choose Pro (or Enterprise/Education): Home cannot boot from a VHDX. Your digital licence usually activates the same edition you already have on this PC.'
-[void](New-Btn $TabBase 'Read editions' 510 47 100 'Mounts the ISO and lists the Windows editions inside it (the same as "dism /Get-WimInfo" in the guide). Pro is selected automatically.' { Read-Editions } 28)
+$CmbEdition = New-Combo 'Edition' 'Which Windows edition to install into the base. Choose Pro (or Enterprise/Education): Home cannot boot from a VHDX. Your digital licence usually activates the same edition you already have on this PC.' 'Pick the ISO, then click Read editions'
+$script:CmbEdition = $CmbEdition
+Put (Lbl 'Edition') 0 1; Put $CmbEdition 1 1 3
 
-[void](New-Lbl $TabBase 'File name:' 10 88)
-$TxtBaseName = New-Object System.Windows.Forms.TextBox
-$TxtBaseName.Location = New-Object System.Drawing.Point(125, 85); $TxtBaseName.Size = New-Object System.Drawing.Size(200, 24); $TxtBaseName.Text = 'base'
-$TabBase.Controls.Add($TxtBaseName); $script:TxtBaseName = $TxtBaseName
-Add-Help $TxtBaseName 'File name' 'Name of the base disk file (".vhdx" is added). Use a version in the name if you plan to rebuild later, e.g. base-25H2.'
-[void](New-Lbl $TabBase '.vhdx' 330 88 60)
+$hName = New-Text 'base' 'File name' 'Name of the base disk file (".vhdx" is added). Use a version in the name if you plan to rebuild later, e.g. base-25H2.'
+$TxtBaseName = $hName.Inner; $script:TxtBaseName = $TxtBaseName
+$lExt = Lbl '.vhdx'; $lExt.Margin = Pad 0 0 0 0
+Put (Lbl 'File name') 0 2; Put $hName 1 2; Put $lExt 2 2 2
 
-[void](New-Lbl $TabBase 'Boot menu name:' 10 123)
-$TxtBootLabel = New-Object System.Windows.Forms.TextBox
-$TxtBootLabel.Location = New-Object System.Drawing.Point(125, 120); $TxtBootLabel.Size = New-Object System.Drawing.Size(200, 24); $TxtBootLabel.Text = 'Win - Base'
-$TabBase.Controls.Add($TxtBootLabel); $script:TxtBootLabel = $TxtBootLabel
-Add-Help $TxtBootLabel 'Boot menu name' 'The name shown in the boot menu when the PC starts. You boot the base only once, to set it up; after that it is locked.'
+$hBoot = New-Text 'Win - Base' 'Boot menu name' 'The name shown in the boot menu when the PC starts. You boot the base only once, to set it up; after that it is locked.'
+$TxtBootLabel = $hBoot.Inner; $script:TxtBootLabel = $TxtBootLabel
+Put (Lbl 'Boot menu name') 0 3; Put $hBoot 1 3 3
 
-[void](New-Lbl $TabBase 'Max size (GB):' 10 158)
-$NumSize = New-Object System.Windows.Forms.NumericUpDown
-$NumSize.Location = New-Object System.Drawing.Point(125, 155); $NumSize.Size = New-Object System.Drawing.Size(80, 24)
-$NumSize.Minimum = 40; $NumSize.Maximum = 4000; $NumSize.Value = 100
-$TabBase.Controls.Add($NumSize); $script:NumSize = $NumSize
-Add-Help $NumSize 'Maximum size' 'The largest size the virtual disk can grow to. The file starts small and grows as data is added. Every environment built on this base gets the same maximum. 80-150 GB is typical; keep games and big data on a physical drive instead.'
+$hSize = New-Num 40 4000 100 110 'Maximum size' 'The largest size the virtual disk can grow to. The file starts small and grows as data is added. Every environment built on this base gets the same maximum. The default is 50% of the free space on the drive of the VHD folder (40-4000 GB); once you change it by hand it is left alone. 80-150 GB is typical; keep games and big data on a physical drive instead. You can change the size later with "Change max size..." on the Environments page.'
+$NumSize = $hSize.Inner; $script:NumSize = $NumSize
+$script:SizeTouched = $false; $script:SettingSize = $false
+$NumSize.Add_ValueChanged({ if (-not $script:SettingSize) { $script:SizeTouched = $true } })
+$NumSize.Add_TextChanged({ if (-not $script:SettingSize) { $script:SizeTouched = $true } })
+Put (Lbl 'Max size (GB)') 0 4; Put $hSize 1 4
 
-$ChkAddBoot = New-Object System.Windows.Forms.CheckBox
-$ChkAddBoot.Location = New-Object System.Drawing.Point(125, 190); $ChkAddBoot.Size = New-Object System.Drawing.Size(480, 22)
-$ChkAddBoot.Text = 'Add it to the boot menu (needed to set it up)'; $ChkAddBoot.Checked = $true
-$TabBase.Controls.Add($ChkAddBoot); $script:ChkAddBoot = $ChkAddBoot
-Add-Help $ChkAddBoot 'Add to boot menu' 'Creates a boot menu entry for the base so you can start it once and finish Windows setup. Your current Windows stays the default.'
+$ChkAddBoot = New-Check 'Add it to the boot menu (needed to set it up)' $true 'Add to boot menu' 'Creates a boot menu entry for the base so you can start it once and finish Windows setup. Your current Windows stays the default.'
+$script:ChkAddBoot = $ChkAddBoot
+$ChkNoExpand = New-Check "Don't expand the file to full size when booted (saves disk space)" $false "Don't expand at boot" 'Normally Windows grows a dynamic VHDX to its FULL maximum size while it is booted (a 100 GB disk takes 100 GB on the drive). Ticking this writes VirtualDiskExpandOnMount=4 into the new Windows, so files stay small. Every environment built on this base inherits it. Risk: if the physical drive fills up completely, the running environment crashes.'
+$script:ChkNoExpand = $ChkNoExpand
+Put (Lbl 'Options') 0 5; Put $ChkAddBoot 1 5 3; Put $ChkNoExpand 1 6 3
 
-$ChkNoExpand = New-Object System.Windows.Forms.CheckBox
-$ChkNoExpand.Location = New-Object System.Drawing.Point(125, 214); $ChkNoExpand.Size = New-Object System.Drawing.Size(480, 22)
-$ChkNoExpand.Text = "Don't expand the file to full size when booted (saves disk space)"
-$TabBase.Controls.Add($ChkNoExpand); $script:ChkNoExpand = $ChkNoExpand
-Add-Help $ChkNoExpand "Don't expand at boot" 'Normally Windows grows a dynamic VHDX to its FULL maximum size while it is booted (a 100 GB disk takes 100 GB on the drive). Ticking this writes VirtualDiskExpandOnMount=4 into the new Windows, so files stay small. Every environment built on this base inherits it. Risk: if the physical drive fills up completely, the running environment crashes.'
-
-[void](New-Lbl $TabBase 'Answer file:' 10 248)
-$TxtAnswer = New-Object System.Windows.Forms.TextBox
-$TxtAnswer.Location = New-Object System.Drawing.Point(125, 245); $TxtAnswer.Size = New-Object System.Drawing.Size(380, 24)
-$TabBase.Controls.Add($TxtAnswer); $script:TxtAnswer = $TxtAnswer
-Add-Help $TxtAnswer 'Answer file (optional)' 'An unattend.xml / autounattend.xml to apply to the new Windows (skip OOBE, create the user, computer name, language, scripts...). It is copied to Windows\Panther\unattend.xml, so the specialize and oobeSystem passes run on the first boot. windowsPE-pass settings (disk layout, edition, setup product key) cannot apply because Windows Setup is not used. Leave empty to use the one inside the ISO, if there is one.'
-[void](New-Btn $TabBase 'Browse...' 510 242 100 'Choose an external answer file. It overrides any autounattend.xml inside the ISO.' {
+$hAns = New-Text '' 'Answer file (optional)' 'An unattend.xml / autounattend.xml to apply to the new Windows (skip OOBE, create the user, computer name, language, scripts...). It is copied to Windows\Panther\unattend.xml, so the specialize and oobeSystem passes run on the first boot. windowsPE-pass settings (disk layout, edition, setup product key) cannot apply because Windows Setup is not used. Leave empty to use the one inside the ISO, if there is one.'
+$TxtAnswer = $hAns.Inner; $script:TxtAnswer = $TxtAnswer
+$btnBrowseAf = New-Btn 'Browse...' 'ghost' 'Choose an external answer file. It overrides any autounattend.xml inside the ISO.' {
     $d = New-Object System.Windows.Forms.OpenFileDialog
     $d.Filter = 'Answer file (*.xml)|*.xml|All files (*.*)|*.*'
     if ($d.ShowDialog($script:Form) -eq [System.Windows.Forms.DialogResult]::OK) { $script:TxtAnswer.Text = $d.FileName }
-  } 28)
+  } 100 32
+$btnBrowseAf.Anchor = 'Left'; $btnBrowseAf.Margin = Pad 0 0 0 0
+Put (Lbl 'Answer file') 0 7; Put $hAns 1 7; Put $btnBrowseAf 2 7 2
 
-$ChkIsoAnswer = New-Object System.Windows.Forms.CheckBox
-$ChkIsoAnswer.Location = New-Object System.Drawing.Point(125, 272); $ChkIsoAnswer.Size = New-Object System.Drawing.Size(500, 22)
-$ChkIsoAnswer.Text = 'Pick the ISO and click "Read editions" to look for an autounattend.xml'; $ChkIsoAnswer.Enabled = $false
-$TabBase.Controls.Add($ChkIsoAnswer); $script:ChkIsoAnswer = $ChkIsoAnswer
-Add-Help $ChkIsoAnswer 'Use answer file from ISO' 'Many custom ISOs contain autounattend.xml in the root. Normally only Windows Setup reads it; this tool applies the image directly, so it copies the file (and sources\$OEM$ folders, if present) into the new Windows itself. A file chosen with Browse overrides this.'
+$ChkIsoAnswer = New-Check 'Pick the ISO and click "Read editions" to look for an autounattend.xml' $false 'Use answer file from ISO' 'Many custom ISOs contain autounattend.xml in the root. Normally only Windows Setup reads it; this tool applies the image directly, so it copies the file (and sources\$OEM$ folders, if present) into the new Windows itself. A file chosen with Browse overrides this.'
+$ChkIsoAnswer.Enabled = $false; $script:ChkIsoAnswer = $ChkIsoAnswer
+Put $ChkIsoAnswer 1 8 3
 
-$BtnCreate = New-Btn $TabBase 'Create base VHDX' 125 300 250 'Does guide steps 2-5 in one go: creates the virtual disk file in the VHD folder, partitions and formats it, installs the chosen Windows edition into it with DISM (5-15 minutes), applies the answer file and the optional no-expand setting, detaches it and adds a boot menu entry, without changing your default Windows. A backup of the boot configuration is saved first.' { New-BaseVhdx } 42
-$BtnCreate.Font = New-Object System.Drawing.Font('Segoe UI', 10, [System.Drawing.FontStyle]::Bold)
-
-[void](New-Btn $TabBase 'Copy sysprep command' 125 350 250 "Copies this command to the clipboard:`r`n$SysprepCmd`r`nOptional: run it in an administrator Command Prompt INSIDE the base, as the last thing before you create environments. It gives every environment its own unique identity (recommended if several will be on the network or join a domain). The base then shuts down; each environment runs a short setup on its first boot." {
+$bFlow = New-Flow; $bFlow.Dock = 'Fill'; $bFlow.Margin = Pad 0 0 0 0; $bFlow.Padding = Pad 0 8 0 0
+$BtnCreate = New-Btn 'Create base VHDX' 'primary' 'Does guide steps 2-5 in one go: creates the virtual disk file in the VHD folder, partitions and formats it, installs the chosen Windows edition into it with DISM (5-15 minutes), applies the answer file and the optional no-expand setting, detaches it and adds a boot menu entry, without changing your default Windows. A backup of the boot configuration is saved first.' { New-BaseVhdx } 230 42
+$BtnCreate.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 10.5); $BtnCreate.Radius = 10; $BtnCreate.Margin = Pad 0 0 14 0
+$bSys = New-Btn 'Copy sysprep command' 'ghost' "Copies this command to the clipboard:`r`n$SysprepCmd`r`nOptional: run it in an administrator Command Prompt INSIDE the base, as the last thing before you create environments. It gives every environment its own unique identity (recommended if several will be on the network or join a domain). The base then shuts down; each environment runs a short setup on its first boot." {
     [System.Windows.Forms.Clipboard]::SetText($SysprepCmd)
     Write-Log "Copied to clipboard: $SysprepCmd"
-  } 32)
+  } 190 42
+$bSys.Radius = 10
+$bFlow.Controls.Add($BtnCreate); $bFlow.Controls.Add($bSys)
+Put $bFlow 1 9 3
 
-$StepsBox = New-Object System.Windows.Forms.GroupBox
-$StepsBox.Text = 'After the base is created'
-$StepsBox.Location = New-Object System.Drawing.Point(640, 10); $StepsBox.Size = New-Object System.Drawing.Size(360, 370)
-$StepsBox.Anchor = 'Top, Right'
-$TabBase.Controls.Add($StepsBox)
-# Small window: scroll the Create base form, and hide the side instructions when they would overlap the fields
-$TabBase.AutoScroll = $true
-$TabBase.AutoScrollMinSize = New-Object System.Drawing.Size(0, 392)
-$TabBase.Add_Resize({ $script:StepsBox.Visible = ($this.ClientSize.Width -ge 1000) })
-$script:StepsBox = $StepsBox
-[void](New-Lbl $StepsBox ("1.  Restart and pick the base in the boot menu (the tool offers to do this for you).`r`n`r`n" +
+$StepsBox = New-Label ("AFTER THE BASE IS CREATED`r`n`r`n" +
+    "1.  Restart and pick the base in the boot menu (the tool offers to do this for you).`r`n`r`n" +
     "2.  Finish Windows setup. Install drivers, all Windows Updates, and the apps EVERY environment should have. Keep it lean.`r`n`r`n" +
     "3.  Optional: run sysprep (button on the left) as the last step.`r`n`r`n" +
     "4.  Shut down and start your normal Windows.`r`n`r`n" +
-    "5.  Open this tool > Environments tab > select the base > 'New environment from selected'. Create as many as you like.`r`n`r`n" +
-    "After that, never boot or change the base: the environments are built on it.") 12 22 336 340)
+    "5.  Open this tool > Environments > select the base > 'New environment from selected'. Create as many as you like.`r`n`r`n" +
+    "After that, never boot or change the base: the environments are built on it.") $script:fSmall $script:cGrey
+$StepsBox.Dock = 'Fill'; $StepsBox.Padding = Pad 32 6 0 0
+$stepsSep = New-Object System.Windows.Forms.Panel; $stepsSep.Dock = 'Left'; $stepsSep.Width = 1; $stepsSep.BackColor = $script:cHair
+$sideBox = New-Object System.Windows.Forms.Panel; $sideBox.Dock = 'Right'; $sideBox.Width = 291; $sideBox.BackColor = $script:cWhite
+$sideBox.Controls.Add($StepsBox); $sideBox.Controls.Add($stepsSep); $stepsSep.SendToBack()
+$script:SideBox = $sideBox
+$pBase.AutoScroll = $true
+$pBase.Controls.Add($tl); $pBase.Controls.Add($sideBox); $sideBox.SendToBack(); $tl.BringToFront()
+# small window: hide the side instructions when they would crowd the form
+$pBase.Add_Resize({ param($s, $e) $v = ($s.ClientSize.Width -ge 840); $script:SideBox.Visible = $v })
 
-# ======================= TAB 3: ENVIRONMENTS =======================
-$EnvList = New-Object System.Windows.Forms.ListView
-$EnvList.Location = New-Object System.Drawing.Point(10, 10); $EnvList.Size = New-Object System.Drawing.Size(640, 372)
-$EnvList.View = 'Details'; $EnvList.FullRowSelect = $true; $EnvList.MultiSelect = $false; $EnvList.HideSelection = $false; $EnvList.GridLines = $true
-[void]$EnvList.Columns.Add('Name', 125); [void]$EnvList.Columns.Add('Type', 75); [void]$EnvList.Columns.Add('Built on', 90)
-[void]$EnvList.Columns.Add('Size', 80); [void]$EnvList.Columns.Add('Boot menu name', 180); [void]$EnvList.Columns.Add('Status', 70)
-$EnvList.Anchor = 'Top, Bottom, Left, Right'
-$EnvList.Add_Resize({ $w = $this.ClientSize.Width - 440 - 4; $this.Columns[4].Width = [Math]::Max(100, $w) })
-$TabEnv.Controls.Add($EnvList); $script:EnvList = $EnvList
+# ======================= PAGE 3: ENVIRONMENTS =======================
+$EnvList = New-List 'EnvList' @(@('Name', 150), @('Type', 110), @('Built on', 120), @('Size', 90), @('Max', 70), @('Boot menu name', 170), @('Status', 110)) 'No .vhdx files in this VHD folder yet. Create a base on the Create base page.'
+$script:EnvList = $EnvList
 $EnvList.Add_SelectedIndexChanged({ if ($this.SelectedItems.Count) { $e = $this.SelectedItems[0].Tag; Show-HelpText "Selected: $($e.Name)" (Get-EnvSummary $e) } })
-Add-Help $EnvList 'Environments' 'Every .vhdx in the VHD folder. Base = the clean Windows that environments are built on (never boot it). Child = an environment that only stores its own changes on top of a base. Standalone = an independent full disk. Select one, then use the buttons on the right.'
-
-$c1 = 660; $c2 = 835; $w = 168; $y0 = 10; $dy = 38
-[void](New-Btn $TabEnv 'New environment from selected' $c1 ($y0 + 0 * $dy) $w "Creates a new environment (e.g. work, gaming, sandbox) built on the selected base. The new file starts at a few MB and stores only what changes compared to the base. A boot menu entry is added, and the tool offers to lock the base (read-only, removed from the boot menu) so it can't be changed by accident." { New-ChildEnv; Update-All })
-[void](New-Btn $TabEnv 'Snapshot' $c1 ($y0 + 1 * $dy) $w 'Saves a copy of the selected environment into <VHD folder>\snapshots, with the date and an optional note in the name. Do this before risky changes (driver updates, new software). Environments are usually small, so this is quick. The environment must not be the one you are running.' { Save-Snapshot; Update-All })
-[void](New-Btn $TabEnv 'Restore snapshot...' $c1 ($y0 + 2 * $dy) $w "Rolls the selected environment back to a snapshot you choose. Everything changed since that snapshot is lost. Works only while you're NOT running that environment." { Restore-Snapshot; Update-All })
-[void](New-Btn $TabEnv 'Reset to fresh' $c1 ($y0 + 3 * $dy) $w 'Erases everything inside the selected environment and starts it again as a clean copy of its base. Its name and boot menu entry stay the same. Ideal for a throwaway "sandbox" environment.' { Reset-Env; Update-All })
-[void](New-Btn $TabEnv 'Make standalone copy' $c1 ($y0 + 4 * $dy) $w 'Creates an independent full copy of the selected environment, merged with its base into one file that no longer depends on anything. Useful for keeping an environment forever, moving it to another drive, or making it the base for a new set. Takes longer and uses more space.' { New-StandaloneCopy; Update-All })
-[void](New-Btn $TabEnv 'Open snapshots folder' $c1 ($y0 + 5 * $dy) $w 'Opens <VHD folder>\snapshots in File Explorer, where you can delete old snapshots you no longer need.' {
-    $d = Join-Path (Get-VhdFolder) 'snapshots'; New-Item -ItemType Directory -Path $d -Force | Out-Null; Start-Process explorer.exe $d })
-[void](New-Btn $TabEnv 'Delete environment' $c1 ($y0 + 6 * $dy) $w 'Permanently deletes the selected environment file and removes its boot menu entries, and optionally its snapshots. A base that other environments are built on cannot be deleted until those are deleted.' { Remove-Env; Update-All })
-
-[void](New-Btn $TabEnv 'Restart into this' $c2 ($y0 + 0 * $dy) $w 'Restarts the PC straight into the selected environment, for this one restart only (bcdedit /bootsequence). Your default does not change. You are asked before the restart happens.' {
-    $e = Get-SelectedEnv; Assert-NoChildren $e; $b = Get-EnvBootEntry $e -OfferToAdd; Update-All; Start-RestartInto $b.Id $b.Description })
-[void](New-Btn $TabEnv 'Set as default boot' $c2 ($y0 + 1 * $dy) $w 'Makes the selected environment the one that starts automatically when nobody picks from the boot menu.' {
-    $e = Get-SelectedEnv; Assert-NoChildren $e; $b = Get-EnvBootEntry $e -OfferToAdd; Invoke-Bcd @('/default', $b.Id) | Out-Null; Write-Log "Default boot is now '$($b.Description)'."; Update-All })
-[void](New-Btn $TabEnv 'Add boot menu entry' $c2 ($y0 + 2 * $dy) $w 'Adds the selected environment to the boot menu, e.g. a standalone copy, or an environment whose entry you removed. Not allowed for a base that others are built on.' {
+Add-Help $EnvList 'Environments' 'Every .vhdx in the VHD folder. Base = the clean Windows that environments are built on (never boot it). Child = an environment that only stores its own changes on top of a base. Standalone = an independent full disk. Select one, then use the buttons below.'
+$cardEnv = New-ListCard $EnvList
+$rp = New-Object System.Windows.Forms.Panel; $rp.Dock = 'Bottom'; $rp.Height = 160; $rp.BackColor = $script:cWhite
+$rp.Add_Paint({ param($s, $e) $e.Graphics.DrawLine($script:penHair, 0, 0, $s.Width, 0) })
+$script:envLayout = {
+  param($s, $e)
+  $y = 12; $x = 0
+  foreach ($c in $s.Controls) {
+    if ($c.Tag -is [string] -and $c.Tag -eq 'grp') { if ($x -gt 0) { $y += 32 }; $c.Location = Pt 0 ($y + 0); $x = 100 }
+    else {
+      if (($x + $c.Width) -gt $s.ClientSize.Width -and $x -gt 100) { $x = 100; $y += 32 }
+      $c.Location = Pt $x $y; $x += $c.Width + 8
+    }
+  }
+  $nh = $y + 30 + 6
+  if ($s.Height -ne $nh) { $s.Height = $nh }
+  if ($s.Parent) { $s.Parent.PerformLayout() }
+}
+$rp.Add_Resize($script:envLayout); $script:rp = $rp
+function Add-EnvGroup([string]$Name) {
+  $gl = Grp $Name; $gl.Size = Sz 92 30; $gl.TextAlign = 'MiddleLeft'; $gl.Tag = 'grp'; $script:rp.Controls.Add($gl)
+}
+Add-EnvGroup 'Create'
+$rp.Controls.Add((New-Btn 'New environment from selected' 'primary' "Creates a new environment (e.g. work, gaming, sandbox) built on the selected base. The new file starts at a few MB and stores only what changes compared to the base. A boot menu entry is added, and the tool offers to lock the base (read-only, removed from the boot menu) so it can't be changed by accident." { New-ChildEnv; Update-All }))
+$rp.Controls.Add((New-Btn 'Make standalone copy' 'ghost' 'Creates an independent full copy of the selected environment, merged with its base into one file that no longer depends on anything. Useful for keeping an environment forever, moving it to another drive, or making it the base for a new set. Takes longer and uses more space.' { New-StandaloneCopy; Update-All }))
+Add-EnvGroup 'Snapshots'
+$rp.Controls.Add((New-Btn 'Snapshot' 'ghost' 'Saves a copy of the selected environment into <VHD folder>\snapshots, with the date and an optional note in the name. Do this before risky changes (driver updates, new software). Environments are usually small, so this is quick. The environment must not be the one you are running.' { Save-Snapshot; Update-All }))
+$rp.Controls.Add((New-Btn 'Restore snapshot...' 'ghost' "Rolls the selected environment back to a snapshot you choose. Everything changed since that snapshot is lost. Works only while you're NOT running that environment." { Restore-Snapshot; Update-All }))
+$rp.Controls.Add((New-Btn 'Open snapshots folder' 'ghost' 'Opens <VHD folder>\snapshots in File Explorer, where you can delete old snapshots you no longer need.' {
+    $d = Join-Path (Get-VhdFolder) 'snapshots'; New-Item -ItemType Directory -Path $d -Force | Out-Null; Start-Process explorer.exe $d }))
+Add-EnvGroup 'Boot menu'
+$rp.Controls.Add((New-Btn 'Restart into this' 'ghost' 'Restarts the PC straight into the selected environment, for this one restart only (bcdedit /bootsequence). Your default does not change. You are asked before the restart happens.' {
+    $e = Get-SelectedEnv; Assert-NoChildren $e; $b = Get-EnvBootEntry $e -OfferToAdd; Update-All; Start-RestartInto $b.Id $b.Description }))
+$rp.Controls.Add((New-Btn 'Set as default boot' 'ghost' 'Makes the selected environment the one that starts automatically when nobody picks from the boot menu.' {
+    $e = Get-SelectedEnv; Assert-NoChildren $e; $b = Get-EnvBootEntry $e -OfferToAdd; Invoke-Bcd @('/default', $b.Id) | Out-Null; Write-Log "Default boot is now '$($b.Description)'."; Update-All }))
+$rp.Controls.Add((New-Btn 'Add boot menu entry' 'ghost' 'Adds the selected environment to the boot menu, e.g. a standalone copy, or an environment whose entry you removed. Not allowed for a base that others are built on.' {
     $e = Get-SelectedEnv; Assert-NoChildren $e
     $l = Read-Text 'Name to show in the boot menu:' 'Boot menu name' "Win - $($e.Name)"; if (-not $l) { return }
-    New-BootEntry $e.Path $l | Out-Null; Update-All })
-[void](New-Btn $TabEnv 'Rename boot menu entry' $c2 ($y0 + 3 * $dy) $w 'Changes the name shown for the selected environment in the boot menu.' {
+    New-BootEntry $e.Path $l | Out-Null; Update-All }))
+$rp.Controls.Add((New-Btn 'Rename boot menu entry' 'ghost' 'Changes the name shown for the selected environment in the boot menu.' {
     $e = Get-SelectedEnv; $b = Get-EnvBootEntry $e
     $l = Read-Text 'New boot menu name:' 'Rename' $b.Description; if (-not $l) { return }
-    Invoke-Bcd @('/set', $b.Id, 'description', $l) | Out-Null; Write-Log "Renamed to '$l'."; Update-All })
-[void](New-Btn $TabEnv 'Remove boot menu entries' $c2 ($y0 + 4 * $dy) $w 'Removes the selected environment from the boot menu. The file is kept, so you can add it back later.' {
+    Invoke-Bcd @('/set', $b.Id, 'description', $l) | Out-Null; Write-Log "Renamed to '$l'."; Update-All }))
+$rp.Controls.Add((New-Btn 'Remove boot menu entries' 'ghost' 'Removes the selected environment from the boot menu. The file is kept, so you can add it back later.' {
     $e = Get-SelectedEnv; Assert-NotRunning $e
     if (-not $e.Boot.Count) { throw "'$($e.Name)' is not in the boot menu." }
     if (-not (Confirm-Action "Remove '$($e.Name)' from the boot menu? (The file is kept.)")) { return }
-    foreach ($b in $e.Boot) { Invoke-Bcd @('/delete', $b.Id) | Out-Null; Write-Log "Removed '$($b.Description)'." }; Update-All })
-[void](New-Btn $TabEnv 'Disable expand-on-boot' $c2 ($y0 + 5 * $dy) $w 'Stops the selected environment from growing its file to the full maximum size while it is booted, using the registry setting VirtualDiskExpandOnMount=4 (guide step 9). Not needed if you ticked the option when creating the base. Risk: if the physical drive fills up, that Windows crashes.' { Disable-EnvExpand; Update-All })
-[void](New-Btn $TabEnv 'Lock / unlock' $c2 ($y0 + 6 * $dy) $w 'Lock = make the file read-only and remove it from the boot menu, so it cannot be changed. Do this for a base once environments are built on it. Unlock makes it writable again, which is only allowed when nothing is built on it.' { Switch-EnvLock; Update-All })
+    foreach ($b in $e.Boot) { Invoke-Bcd @('/delete', $b.Id) | Out-Null; Write-Log "Removed '$($b.Description)'." }; Update-All }))
+$rp.Controls.Add((New-Btn 'Disable expand-on-boot' 'ghost' 'Stops the selected environment from growing its file to the full maximum size while it is booted, using the registry setting VirtualDiskExpandOnMount=4 (guide step 9). Not needed if you ticked the option when creating the base. Risk: if the physical drive fills up, that Windows crashes.' { Disable-EnvExpand; Update-All }))
+Add-EnvGroup 'Manage'
+$rp.Controls.Add((New-Btn 'Change max size...' 'ghost' 'Changes the maximum size (the "Max" column) of a standalone disk, or of a base nobody is built on. Growing enlarges the virtual disk and extends the Windows partition inside it automatically. Shrinking needs the Hyper-V PowerShell module and is only possible if the data inside fits. Environments built on a base (differencing disks) cannot be resized: use "Make standalone copy" first. Not allowed for the running Windows or a locked disk, and the disk must not be in use.' { Set-EnvMaxSize; Update-All }))
+$rp.Controls.Add((New-Btn 'Lock / unlock' 'ghost' 'Lock = make the file read-only and remove it from the boot menu, so it cannot be changed. Do this for a base once environments are built on it. Unlock makes it writable again, which is only allowed when nothing is built on it.' { Switch-EnvLock; Update-All }))
+$rp.Controls.Add((New-Btn 'Reset to fresh' 'danger' 'Erases everything inside the selected environment and starts it again as a clean copy of its base. Its name and boot menu entry stay the same. Ideal for a throwaway "sandbox" environment.' { Reset-Env; Update-All }))
+$rp.Controls.Add((New-Btn 'Delete environment' 'danger' 'Permanently deletes the selected environment file and removes its boot menu entries, and optionally its snapshots. A base that other environments are built on cannot be deleted until those are deleted.' { Remove-Env; Update-All }))
+foreach ($c in $rp.Controls) { if ($c -is [RBtn]) { $c.Height = 30 } }
+$pEnv.Controls.Add($cardEnv); $pEnv.Controls.Add($rp); $cardEnv.BringToFront()
 
-# ======================= TAB 4: BOOT MENU =======================
-$BootList = New-Object System.Windows.Forms.ListView
-$BootList.Location = New-Object System.Drawing.Point(10, 10); $BootList.Size = New-Object System.Drawing.Size(640, 372)
-$BootList.View = 'Details'; $BootList.FullRowSelect = $true; $BootList.MultiSelect = $false; $BootList.HideSelection = $false; $BootList.GridLines = $true
-[void]$BootList.Columns.Add('Boot menu name', 170); [void]$BootList.Columns.Add('Boots from', 230)
-[void]$BootList.Columns.Add('Status', 90); [void]$BootList.Columns.Add('Id', 130)
-$BootList.Anchor = 'Top, Bottom, Left, Right'
-$BootList.Add_Resize({ $w = $this.ClientSize.Width - 390 - 4; $this.Columns[1].Width = [Math]::Max(120, $w) })
-$TabBoot.Controls.Add($BootList); $script:BootList = $BootList
+# ======================= PAGE 4: BOOT MENU =======================
+$BootList = New-List 'BootList' @(@('Boot menu name', 190), @('Boots from', 300), @('Status', 190), @('Id', 220)) 'No Windows boot entries could be read. Reading the boot menu needs administrator rights.'
+$script:BootList = $BootList
 Add-Help $BootList 'Boot menu' 'All Windows entries in the boot menu (the default is shown in bold). "Boots from" shows the VHDX file, or the physical partition for a normal install.'
-
-[void](New-Btn $TabBoot 'Refresh' $c1 ($y0 + 0 * $dy) $w 'Re-reads the boot menu.' { Update-BootList })
-[void](New-Btn $TabBoot 'Set as default' $c1 ($y0 + 1 * $dy) $w 'Makes the selected entry start automatically when nobody picks from the boot menu.' {
-    $b = Get-SelectedBoot; Assert-BootableEntry $b; Invoke-Bcd @('/default', $b.Id) | Out-Null; Write-Log "Default is now '$($b.Description)'."; Update-All })
-[void](New-Btn $TabBoot 'Restart into this' $c1 ($y0 + 2 * $dy) $w 'Restarts the PC into the selected entry once. The default does not change. You are asked first.' {
-    $b = Get-SelectedBoot; Assert-BootableEntry $b; Start-RestartInto $b.Id $b.Description })
-[void](New-Btn $TabBoot 'Rename' $c1 ($y0 + 3 * $dy) $w 'Changes the name of the selected entry in the boot menu.' {
+$cardBoot = New-ListCard $BootList
+$f4 = New-Flow; $f4.Dock = 'Bottom'; $f4.AutoSize = $true; $f4.Padding = Pad 0 18 0 0
+[void]$f4.Controls.Add((New-Btn 'Set as default' 'primary' 'Makes the selected entry start automatically when nobody picks from the boot menu.' {
+    $b = Get-SelectedBoot; Assert-BootableEntry $b; Invoke-Bcd @('/default', $b.Id) | Out-Null; Write-Log "Default is now '$($b.Description)'."; Update-All }))
+[void]$f4.Controls.Add((New-Btn 'Restart into this' 'ghost' 'Restarts the PC into the selected entry once. The default does not change. You are asked first.' {
+    $b = Get-SelectedBoot; Assert-BootableEntry $b; Start-RestartInto $b.Id $b.Description }))
+[void]$f4.Controls.Add((New-Btn 'Rename' 'ghost' 'Changes the name of the selected entry in the boot menu.' {
     $b = Get-SelectedBoot; $l = Read-Text 'New boot menu name:' 'Rename' $b.Description; if (-not $l) { return }
-    Invoke-Bcd @('/set', $b.Id, 'description', $l) | Out-Null; Write-Log "Renamed to '$l'."; Update-All })
-[void](New-Btn $TabBoot 'Delete entry' $c1 ($y0 + 4 * $dy) $w 'Removes the selected entry from the boot menu. Only the menu entry is removed: no files are deleted. You cannot delete the entry of the Windows you are running.' {
+    Invoke-Bcd @('/set', $b.Id, 'description', $l) | Out-Null; Write-Log "Renamed to '$l'."; Update-All }))
+[void]$f4.Controls.Add((New-Btn 'Delete entry' 'danger' 'Removes the selected entry from the boot menu. Only the menu entry is removed: no files are deleted. You cannot delete the entry of the Windows you are running.' {
     $b = Get-SelectedBoot
     $cur = Get-BootEntries '{current}'; if ($cur.Count -and $cur[0].Id -eq $b.Id) { throw 'That is the Windows you are running right now; its entry cannot be deleted from here.' }
     if (-not (Confirm-Action "Remove '$($b.Description)' from the boot menu?`r`n(No files are deleted.)")) { return }
-    Invoke-Bcd @('/delete', $b.Id) | Out-Null; Write-Log "Deleted entry '$($b.Description)'."; Update-All })
+    Invoke-Bcd @('/delete', $b.Id) | Out-Null; Write-Log "Deleted entry '$($b.Description)'."; Update-All }))
+$bRef4 = New-Btn 'Refresh' 'ghost' 'Re-reads the boot menu.' { Update-BootList }
+$f4.Controls.Add($bRef4); $f4.SetFlowBreak($bRef4, $true)
+$wl = New-Label 'Boot menu wait (seconds):' $script:fBody $script:cGrey; $wl.AutoSize = $true; $wl.Margin = Pad 0 15 10 0
+$hTimeout = New-Num 0 999 10 96 'Boot menu wait' 'How many seconds the boot menu waits for you to choose before starting the default. 0 = skip the menu.'
+$NumTimeout = $hTimeout.Inner; $script:NumTimeout = $NumTimeout
+$hTimeout.Margin = Pad 0 10 8 0; $hTimeout.Anchor = 'None'
+$bWait = New-Btn 'Set wait' 'ghost' 'Applies the boot menu wait time on the left.' {
+    Invoke-Bcd @('/timeout', [string][int]$NumTimeout.Value) | Out-Null; Write-Log "Boot menu now waits $([int]$NumTimeout.Value) seconds." } 90 32
+$bWait.Margin = Pad 0 10 0 0
+$f4.Controls.Add($wl); $f4.Controls.Add($hTimeout); $f4.Controls.Add($bWait); $f4.SetFlowBreak($bWait, $true)
+$note4 = New-Label 'Every change to the boot menu is backed up automatically. Restore an earlier state on the Backup / restore page.' $script:fSmall $script:cGrey
+$note4.Size = Sz 520 34; $note4.Margin = Pad 0 6 0 0; $f4.Controls.Add($note4)
+$pBoot.Controls.Add($cardBoot); $pBoot.Controls.Add($f4); $cardBoot.BringToFront()
 
-$lblTo = New-Lbl $TabBoot 'Boot menu wait (seconds):' $c2 ($y0 + 8) 170
-$NumTimeout = New-Object System.Windows.Forms.NumericUpDown
-$NumTimeout.Location = New-Object System.Drawing.Point($c2, ($y0 + 1 * $dy - 4)); $NumTimeout.Size = New-Object System.Drawing.Size(70, 24)
-$NumTimeout.Minimum = 0; $NumTimeout.Maximum = 999; $NumTimeout.Value = 10
-$TabBoot.Controls.Add($NumTimeout)
-Add-Help $NumTimeout 'Boot menu wait' 'How many seconds the boot menu waits for you to choose before starting the default. 0 = skip the menu.'
-[void](New-Btn $TabBoot 'Set wait' ($c2 + 78) ($y0 + 1 * $dy - 6) 90 'Applies the boot menu wait time on the left.' {
-    Invoke-Bcd @('/timeout', [string][int]$NumTimeout.Value) | Out-Null; Write-Log "Boot menu now waits $([int]$NumTimeout.Value) seconds." } 28)
-[void](New-Lbl $TabBoot "Every change to the boot menu is backed up automatically. Restore an earlier state on tab 5." $c2 ($y0 + 2 * $dy + 10) 168 70)
-
-# ======================= TAB 5: BACKUP / RESTORE =======================
-$BackupList = New-Object System.Windows.Forms.ListView
-$BackupList.Location = New-Object System.Drawing.Point(10, 10); $BackupList.Size = New-Object System.Drawing.Size(640, 232)
-$BackupList.View = 'Details'; $BackupList.FullRowSelect = $true; $BackupList.MultiSelect = $true; $BackupList.HideSelection = $false; $BackupList.GridLines = $true
-[void]$BackupList.Columns.Add('Date / time', 150); [void]$BackupList.Columns.Add('Reason / action', 380); [void]$BackupList.Columns.Add('Size', 70)
-$BackupList.Anchor = 'Top, Bottom, Left, Right'
-$BackupList.Add_Resize({ $this.Columns[1].Width = [Math]::Max(120, $this.ClientSize.Width - 220 - 4) })
-$TabBackup.Controls.Add($BackupList); $script:BackupList = $BackupList
-Add-Help $BackupList 'Boot configuration backups' 'Every saved state of the boot menu, newest first. A backup is made automatically before each change made with this tool (add / remove / rename entries, default, wait time, restore), plus any you create by hand (blue). Select one to see what is in it and what restoring it would change.'
-
-$BackupInfo = New-Object System.Windows.Forms.TextBox
-$BackupInfo.Location = New-Object System.Drawing.Point(10, 250); $BackupInfo.Size = New-Object System.Drawing.Size(640, 132)
-$BackupInfo.Multiline = $true; $BackupInfo.ReadOnly = $true; $BackupInfo.ScrollBars = 'Vertical'
-$BackupInfo.Font = New-Object System.Drawing.Font('Consolas', 8.5); $BackupInfo.BackColor = [System.Drawing.Color]::White
-$BackupInfo.Anchor = 'Bottom, Left, Right'
-$TabBackup.Controls.Add($BackupInfo); $script:BackupInfo = $BackupInfo
+# ======================= PAGE 5: BACKUP / RESTORE =======================
+$BackupList = New-List 'BackupList' @(@('Date / time', 190), @('Reason / action', 380), @('Size', 90)) 'No boot configuration backups yet. One is made automatically before every change, or click Back up now.' $true
+$script:BackupList = $BackupList
+Add-Help $BackupList 'Boot configuration backups' 'Every saved state of the boot menu, newest first. A backup is made automatically before each change made with this tool (add / remove / rename entries, default, wait time, restore), plus any you create by hand (orange). Select one to see what is in it and what restoring it would change.'
+$cardBackup = New-ListCard $BackupList
+$detH = New-Multi (New-Object System.Drawing.Font('Consolas', 9)); $detH.Dock = 'Fill'
+$BackupInfo = $detH.Inner; $script:BackupInfo = $BackupInfo
+$detWrap = New-Object System.Windows.Forms.Panel; $detWrap.Dock = 'Bottom'; $detWrap.Height = 112; $detWrap.BackColor = $script:cWhite; $detWrap.Padding = Pad 0 6 0 0
+$dl = Grp 'Details of selected backup'; $dl.Dock = 'Left'; $dl.Width = 240; $dl.TextAlign = 'MiddleLeft'
+$kl = New-Label 'Keep newest automatic backups' $script:fBody $script:cGrey; $kl.Dock = 'Right'; $kl.Width = 220; $kl.TextAlign = 'MiddleRight'
+$hKeep = New-Num 10 1000 $script:KeepBackups 100 'Backups to keep' 'How many automatic backups to keep. Older automatic ones are deleted when a new one is made. Backups you create with "Back up now" are never deleted automatically. Each backup is only a few tens of KB.'
+$NumKeep = $hKeep.Inner; $script:NumKeep = $NumKeep
+$NumKeep.Add_ValueChanged({ $script:KeepBackups = [int]$this.Value })
+$hKeep.Anchor = 'None'; $hKeep.Dock = 'Right'; $hKeep.Margin = Pad 0 0 0 0
+$ksp = New-Object System.Windows.Forms.Panel; $ksp.Dock = 'Right'; $ksp.Width = 10; $ksp.BackColor = $script:cWhite
+$hdr = New-Object System.Windows.Forms.Panel; $hdr.Dock = 'Top'; $hdr.Height = 34; $hdr.BackColor = $script:cWhite
+$hdr.Controls.Add($dl); $hdr.Controls.Add($kl); $hdr.Controls.Add($ksp); $hdr.Controls.Add($hKeep)
+$detWrap.Controls.Add($detH); $detWrap.Controls.Add($hdr); $detH.BringToFront()
 $BackupList.Add_SelectedIndexChanged({
     try {
       $n = $script:BackupList.SelectedItems.Count
@@ -1478,47 +2115,173 @@ $BackupList.Add_SelectedIndexChanged({
     }
     catch { $script:BackupInfo.Text = "Could not read this backup: $($_.Exception.Message)" }
   })
-
-[void](New-Btn $TabBackup 'Back up now' $c1 ($y0 + 0 * $dy) $w 'Saves the current boot menu configuration right now, with an optional note. Manual backups are never removed automatically.' {
+$f5 = New-Flow; $f5.Dock = 'Bottom'; $f5.AutoSize = $true; $f5.Padding = Pad 0 14 0 0
+[void]$f5.Controls.Add((New-Btn 'Back up now' 'primary' 'Saves the current boot menu configuration right now, with an optional note. Manual backups are never removed automatically.' {
     $note = Read-Text 'Optional short note for this backup (e.g. before-bios-update). Leave empty for none:' 'Back up now' ''
     $reason = 'manual'; $s = ConvertTo-Slug $note; if ($s) { $reason = "manual-$s" }
-    Backup-Bcd -Reason $reason -Force; Update-BackupList })
-[void](New-Btn $TabBackup 'Restore selected...' $c1 ($y0 + 1 * $dy) $w 'Replaces the whole boot menu with the selected backup: entries, default and wait time. You see exactly what changes first, and the current state is saved automatically so the restore can be undone. VHDX files are not touched.' { Restore-BcdBackup })
-[void](New-Btn $TabBackup 'Delete selected' $c1 ($y0 + 2 * $dy) $w 'Deletes the selected backup file(s). Only the backup is removed.' {
+    Backup-Bcd -Reason $reason -Force; Update-BackupList }))
+[void]$f5.Controls.Add((New-Btn 'Restore selected...' 'ghost' 'Replaces the whole boot menu with the selected backup: entries, default and wait time. You see exactly what changes first, and the current state is saved automatically so the restore can be undone. VHDX files are not touched.' { Restore-BcdBackup }))
+[void]$f5.Controls.Add((New-Btn 'Delete selected' 'danger' 'Deletes the selected backup file(s). Only the backup is removed.' {
     $sel = Get-SelectedBackups
     if (-not (Confirm-Action "Delete $($sel.Count) backup file(s)?")) { return }
     foreach ($b in $sel) { Remove-Item -LiteralPath $b.Path -Force; Write-Log "Deleted backup $($b.Name)" }
-    Update-BackupList })
-[void](New-Btn $TabBackup 'Open backups folder' $c1 ($y0 + 3 * $dy) $w 'Opens <VHD folder>\bcd-backups in File Explorer.' { Start-Process explorer.exe (Get-BackupDir) })
-[void](New-Btn $TabBackup 'Refresh' $c1 ($y0 + 4 * $dy) $w 'Re-reads the backup list.' { Update-BackupList })
+    Update-BackupList }))
+[void]$f5.Controls.Add((New-Btn 'Open backups folder' 'ghost' 'Opens <VHD folder>\bcd-backups in File Explorer.' { Start-Process explorer.exe (Get-BackupDir) }))
+$bRef5 = New-Btn 'Refresh' 'ghost' 'Re-reads the backup list.' { Update-BackupList }
+$f5.Controls.Add($bRef5); $f5.SetFlowBreak($bRef5, $true)
+$note5 = New-Label 'A backup is made automatically before every change this tool makes to the boot menu, and before every restore.' $script:fSmall $script:cGrey
+$note5.Size = Sz 520 34; $note5.Margin = Pad 0 6 0 0; $f5.Controls.Add($note5)
+$pBackup.Controls.Add($cardBackup); $pBackup.Controls.Add($detWrap); $pBackup.Controls.Add($f5); $cardBackup.BringToFront()
 
-[void](New-Lbl $TabBackup 'Keep newest automatic backups:' $c2 ($y0 + 8) 168)
-$NumKeep = New-Object System.Windows.Forms.NumericUpDown
-$NumKeep.Location = New-Object System.Drawing.Point($c2, ($y0 + 1 * $dy - 4)); $NumKeep.Size = New-Object System.Drawing.Size(80, 24)
-$NumKeep.Minimum = 10; $NumKeep.Maximum = 1000; $NumKeep.Value = $script:KeepBackups
-$NumKeep.Add_ValueChanged({ $script:KeepBackups = [int]$this.Value })
-$TabBackup.Controls.Add($NumKeep); $script:NumKeep = $NumKeep
-Add-Help $NumKeep 'Backups to keep' 'How many automatic backups to keep. Older automatic ones are deleted when a new one is made. Backups you create with "Back up now" are never deleted automatically. Each backup is only a few tens of KB.'
-[void](New-Lbl $TabBackup "A backup is made automatically before every change this tool makes to the boot menu, and before every restore." $c2 ($y0 + 2 * $dy + 10) 168 100)
+# ---- sidebar navigation ----
+$Nav = New-Object NavRail
+$Nav.Dock = 'Left'; $Nav.Width = 212
+$Nav.Items = @('Check system', 'Create base', 'Environments', 'Boot menu', 'Backup / restore')
+$Nav.Sub = 'Native VHD boot'
+$Nav.Footer = $(if ($isAdmin) { 'Running as administrator' } else { 'Not elevated (limited)' })
+$script:Nav = $Nav
+$Nav.Add_SelectedChanged({ param($s, $e) Show-Page $s.Selected })
+$script:lists = @($EnvList, $BootList, $BackupList)
+function Show-Page([int]$i) {
+  for ($k = 0; $k -lt $script:pageList.Count; $k++) { $script:pageList[$k].Visible = ($k -eq $i) }
+  $script:Nav.Pick($i)
+  $script:PageTitle.Text = $script:Nav.Items[$i]
+  $script:pageList[$i].BringToFront()
+  if ($i -eq 2) { & $script:envLayout $script:rp $null }
+  foreach ($l in $script:lists) { if ($l.Visible) { $l.Refresh() } }
+}
+# the sidebar follows the busy state (Set-Busy disables $script:Tabs)
+$Tabs.Add_EnabledChanged({ $script:Nav.Enabled = $this.Enabled })
+$Form.Add_KeyDown({
+    param($s, $e)
+    if ($e.Control -and $e.KeyValue -ge 49 -and $e.KeyValue -le 53 -and $script:Tabs.Enabled) { Show-Page ($e.KeyValue - 49); $e.Handled = $true }
+  })
+
+# ---- top bar: page title + VHD folder ----
+$top = New-Object System.Windows.Forms.Panel; $top.Dock = 'Top'; $top.Height = 92; $top.BackColor = $script:cWhite
+$top.Add_Paint({ param($s, $e) $e.Graphics.DrawLine($script:penHair, 0, $s.Height - 1, $s.Width, $s.Height - 1) })
+$PageTitle = New-Label 'Check system' (New-Object System.Drawing.Font('Segoe UI Light', 20)) $script:cInk
+$PageTitle.Dock = 'Top'; $PageTitle.Height = 42; $PageTitle.TextAlign = 'MiddleLeft'
+$script:PageTitle = $PageTitle
+$row = New-Object System.Windows.Forms.Panel; $row.Dock = 'Top'; $row.Height = 44; $row.BackColor = $script:cWhite
+$vl = New-Label 'VHD folder' $script:fBody $script:cGrey; $vl.Location = Pt 0 6; $vl.Size = Sz 90 32; $vl.TextAlign = 'MiddleLeft'
+$TopPanel = New-Object System.Windows.Forms.Panel
+$TopPanel.BackColor = $script:cWhite; $TopPanel.Location = Pt 92 0; $TopPanel.Size = Sz 500 44
+$script:TopPanel = $TopPanel
+$hFolder = New-Text 'C:\VHD' 'VHD folder' 'Where all environment files (.vhdx), snapshots, boot-config backups and the log are kept. Must be on an NTFS drive that is NOT BitLocker-encrypted. Default: C:\VHD. Inside a VHDX-booted Windows the physical drive has a different letter (often D:), and the tool detects that automatically.'
+$TxtFolder = $hFolder.Inner; $script:TxtFolder = $TxtFolder
+$hFolder.Dock = 'None'; $hFolder.Margin = Pad 0 0 0 0
+$TxtFolder.Add_TextChanged({ try { Update-DefaultBaseSize } catch {} })
+$TxtFolder.Add_Leave({ try { Update-All } catch { Write-Log "ERROR: $($_.Exception.Message)" } })
+$fl = New-Flow; $fl.AutoSize = $true; $fl.WrapContents = $false; $fl.Margin = Pad 0 0 0 0; $fl.Padding = Pad 0 0 0 0
+$b1 = New-Btn 'Browse...' 'ghost' 'Choose a different folder to store the VHDX files in.' {
+  $d = New-Object System.Windows.Forms.FolderBrowserDialog
+  $d.Description = 'Folder for VHDX files (NTFS, not BitLocker-encrypted)'
+  if ($d.ShowDialog($script:Form) -eq [System.Windows.Forms.DialogResult]::OK) { $script:TxtFolder.Text = $d.SelectedPath; Update-All }
+}
+$b2 = New-Btn 'Open in Explorer' 'ghost' 'Opens the VHD folder in File Explorer.' { Start-Process explorer.exe (Get-VhdFolder) }
+$b3 = New-Btn 'Refresh everything' 'ghost' 'Re-reads the VHDX files and the boot menu. Use this after changing things outside the tool.' { Update-All; Write-Log 'Refreshed.' }
+foreach ($b in $b1, $b2, $b3) { $b.Margin = Pad 8 0 0 0; $fl.Controls.Add($b) }
+$TopPanel.Controls.Add($hFolder); $TopPanel.Controls.Add($fl)
+$script:topFl = $fl; $script:topHost = $hFolder; $script:topRow = $row; $script:topBar = $top
+# narrow window: the buttons move below the folder box
+$TopPanel.Add_Resize({
+    param($s, $e)
+    $w = $s.ClientSize.Width; $fw = $script:topFl.PreferredSize.Width
+    if (($w - $fw - 12) -ge 200) {
+      $script:topHost.SetBounds(0, 6, ($w - $fw - 12), 32); $script:topFl.Location = Pt ($w - $fw) 6
+      $rh = 44
+    }
+    else {
+      $script:topHost.SetBounds(0, 6, $w, 32); $script:topFl.Location = Pt ([Math]::Max(0, $w - $fw)) 42
+      $rh = 78
+    }
+    if ($script:topRow.Height -ne $rh) { $script:topRow.Height = $rh; $script:topBar.Height = 42 + $rh + 6 }
+  })
+$row.Controls.Add($vl); $row.Controls.Add($TopPanel)
+$row.Add_Resize({ param($s, $e) $script:TopPanel.SetBounds(92, 0, [Math]::Max(100, $s.ClientSize.Width - 92), $s.ClientSize.Height) })
+$top.Controls.Add($row); $top.Controls.Add($PageTitle)
+
+# ---- bottom card: description, status, log ----
+$botCard = New-Object RCard; $botCard.Dock = 'Bottom'; $botCard.Height = 204; $botCard.Padding = Pad 18 10 18 10; $botCard.Radius = 12
+$LogBox = New-Object System.Windows.Forms.TextBox
+$LogBox.Multiline = $true; $LogBox.ReadOnly = $true; $LogBox.BorderStyle = 'None'; $LogBox.BackColor = $script:cWhite; $LogBox.ForeColor = $script:cGrey
+$LogBox.Font = New-Object System.Drawing.Font('Consolas', 9); $LogBox.ScrollBars = 'Vertical'; $LogBox.Dock = 'Fill'
+$script:LogBox = $LogBox; [Gfx]::Explorer($LogBox)
+$logLine = New-Object System.Windows.Forms.Panel; $logLine.Dock = 'Top'; $logLine.Height = 7; $logLine.BackColor = $script:cWhite
+$logLine.Add_Paint({ param($s, $e) $e.Graphics.DrawLine($script:penHair, 0, 3, $s.Width, 3) })
+$StatusLbl = New-Label '' (New-Object System.Drawing.Font('Consolas', 8.5)) $script:cGrey
+$StatusLbl.Dock = 'Top'; $StatusLbl.Height = 20; $StatusLbl.TextAlign = 'MiddleLeft'
+$script:StatusLbl = $StatusLbl
+$DescText = New-Object System.Windows.Forms.TextBox
+$DescText.Multiline = $true; $DescText.ReadOnly = $true; $DescText.BorderStyle = 'None'; $DescText.BackColor = $script:cWhite; $DescText.ForeColor = $script:cGrey
+$DescText.Font = $script:fBody; $DescText.ScrollBars = 'None'; $DescText.Dock = 'Top'; $DescText.Height = 66
+[Gfx]::Explorer($DescText); Set-AutoScroll $DescText
+$DescTitle = New-Label 'Description' (New-Object System.Drawing.Font('Segoe UI Semibold', 10.5)) $script:cInk
+$DescTitle.Dock = 'Top'; $DescTitle.Height = 22
+$script:DescTitle = $DescTitle; $script:DescText = $DescText
+$botCard.Controls.Add($LogBox); $botCard.Controls.Add($logLine); $botCard.Controls.Add($StatusLbl); $botCard.Controls.Add($DescText); $botCard.Controls.Add($DescTitle)
+Show-HelpText 'Hover over any button' 'Move the mouse over a button or field and its explanation appears here. Work through the pages from top to bottom: check the PC, create a base Windows, then create environments from it.'
+
+$script:botCard = $botCard
+# short window: the description / log card gets smaller to leave room for the page
+$Form.Add_Resize({
+    $small = ($script:Form.ClientSize.Height -lt 740)
+    $h = if ($small) { 168 } else { 204 }
+    if ($script:botCard.Height -ne $h) { $script:botCard.Height = $h; $script:DescText.Height = $(if ($small) { 54 } else { 66 }) }
+  })
+$gap = New-Object System.Windows.Forms.Panel; $gap.Dock = 'Bottom'; $gap.Height = 14; $gap.BackColor = $script:cWhite
+$right = New-Object System.Windows.Forms.Panel; $right.Dock = 'Fill'; $right.BackColor = $script:cWhite; $right.Padding = Pad 24 6 24 14
+$right.Controls.Add($Tabs); $right.Controls.Add($gap); $right.Controls.Add($botCard); $right.Controls.Add($top)
+$Form.Controls.Add($right); $Form.Controls.Add($Nav)
+Show-Page 0
 
 # ---- startup / shutdown ----
 $running = $null
 try { $running = Get-RunningVhd } catch {}
 if ($running) { $TxtFolder.Text = Split-Path $running -Parent } else { $TxtFolder.Text = 'C:\VHD' }
-
-# button columns on the Environments / Boot menu tabs stick to the right edge
-foreach ($tp in $TabEnv, $TabBoot, $TabBackup) {
-  foreach ($c in @($tp.Controls)) { if ($c -isnot [System.Windows.Forms.ListView] -and $c -isnot [System.Windows.Forms.TextBox]) { $c.Anchor = 'Top, Right' } }
-}
 Restore-WindowState
 
+# window chrome (Windows 11 title bar colours) and verification helpers
+function Set-Dwm($attr, $val) { try { [void][Win.Dwm]::DwmSetWindowAttribute($script:Form.Handle, $attr, [ref]$val, 4) } catch {} }
+function Save-Shot([string]$Path) {
+  $f = $script:Form
+  $bmp = New-Object System.Drawing.Bitmap($f.Width, $f.Height)
+  $g = [System.Drawing.Graphics]::FromImage($bmp)
+  $hdc = $g.GetHdc()
+  try { [void][Win.U32]::PrintWindow($f.Handle, $hdc, 2) } finally { $g.ReleaseHdc($hdc) }
+  $g.Dispose(); $bmp.Save($Path, [System.Drawing.Imaging.ImageFormat]::Png); $bmp.Dispose()
+}
+
 $Form.Add_Shown({
+    Set-Dwm 20 0; Set-Dwm 35 0x00FFFFFF; Set-Dwm 36 0x00111111; Set-Dwm 34 0x00DDDDDD
     Invoke-Action 'Loading' {
       Write-Log "VHDX Boot Manager started. Booted from: $(if ($running) { $running } else { 'physical disk' })"
       Update-All
       Invoke-SystemCheck
     }
+    Show-Page 0
+    if ($ScreenshotDir) {
+      $script:shotTimer = New-Object System.Windows.Forms.Timer; $script:shotTimer.Interval = 600
+      $script:shotTimer.Add_Tick({
+          $script:shotTimer.Stop()
+          try {
+            New-Item -ItemType Directory -Force -Path $ScreenshotDir | Out-Null
+            for ($k = 1; $k -le 5; $k++) {
+              Show-Page ($k - 1)
+              [System.Windows.Forms.Application]::DoEvents(); Start-Sleep -Milliseconds 400; [System.Windows.Forms.Application]::DoEvents()
+              Save-Shot (Join-Path $ScreenshotDir ("page{0}.png" -f $k))
+            }
+          }
+          finally { $script:Form.Close() }
+        })
+      $script:shotTimer.Start()
+    }
   })
 $Form.Add_FormClosing({ Save-WindowState; Dismount-Iso })
 
+if ($AutoCloseSeconds -gt 0) {
+  $script:closeTimer = New-Object System.Windows.Forms.Timer; $script:closeTimer.Interval = $AutoCloseSeconds * 1000
+  $script:closeTimer.Add_Tick({ $script:closeTimer.Stop(); $script:Form.Close() }); $script:closeTimer.Start()
+}
 [void]$Form.ShowDialog()
