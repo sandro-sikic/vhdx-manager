@@ -1,6 +1,6 @@
-# VHDX Boot Manager - User Guide
+# VHDX Manager - User Guide
 
-VHDX Boot Manager is a point-and-click Windows tool for running **several independent, bare-metal Windows installs** from `.vhdx` files, using Windows' built-in _native VHD boot_.
+VHDX Manager is a point-and-click Windows tool for running **several independent, bare-metal Windows installs** from `.vhdx` files, using Windows' built-in _native VHD boot_.
 
 You build one clean **base** Windows once. Then you create as many lightweight **environments** (work, gaming, sandbox, ...) on top of it. Each environment stores only its own changes, so it starts at a few MB, boots on real hardware (no virtual machine), and can be snapshotted, rolled back, reset to fresh or resized.
 
@@ -86,7 +86,7 @@ There is nothing to install.
 2. Double-click **`Start VHDX Manager.cmd`**. It unblocks the script and starts it with a hidden console window.
 3. Accept the **UAC prompt** (administrator rights).
 
-**Expected result:** the VHDX Boot Manager window opens on the _Check system_ page and runs a system check automatically.
+**Expected result:** the VHDX Manager window opens on the _Check system_ page and runs a system check automatically.
 
 Alternatives:
 

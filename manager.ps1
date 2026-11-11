@@ -1,7 +1,7 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    VHDX Boot Manager - a point-and-click GUI for running several bare-metal
+    VHDX Manager - a point-and-click GUI for running several bare-metal
     Windows environments from VHDX files (Windows "native VHD boot").
 
 .DESCRIPTION
@@ -92,7 +92,7 @@ function Confirm-Action([string]$Text, [string]$Title = 'Please confirm') {
   return ($r -eq [System.Windows.Forms.DialogResult]::Yes)
 }
 
-function Show-Info([string]$Text, [string]$Title = 'VHDX Boot Manager') {
+function Show-Info([string]$Text, [string]$Title = 'VHDX Manager') {
   [void][System.Windows.Forms.MessageBox]::Show($script:Form, $Text, $Title, [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information)
 }
 
@@ -1613,7 +1613,7 @@ public class NavRail : Control {
             for (int k = 0; k < 3; k++) using (GraphicsPath bp = Gfx.Round(new Rectangle(31, 36 + k * 8, 22, 4), 2)) g.FillPath(wb, bp);
         }
         int tw = Width - 70 - 12;
-        using (Font f1 = Fit("VHDX Boot Manager", "Segoe UI Semibold", 11f, 8.5f, tw)) TextRenderer.DrawText(g, "VHDX Boot Manager", f1, new Rectangle(70, 28, tw, 20), ink, TextFormatFlags.NoPadding | TextFormatFlags.VerticalCenter);
+        using (Font f1 = Fit("VHDX Manager", "Segoe UI Semibold", 11f, 8.5f, tw)) TextRenderer.DrawText(g, "VHDX Manager", f1, new Rectangle(70, 28, tw, 20), ink, TextFormatFlags.NoPadding | TextFormatFlags.VerticalCenter);
         using (Font f2 = Fit(Sub, "Segoe UI Semilight", 9f, 7.5f, tw)) TextRenderer.DrawText(g, Sub, f2, new Rectangle(70, 48, tw, 16), grey, TextFormatFlags.NoPadding | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
         using (Pen hp = new Pen(hair)) g.DrawLine(hp, 20, 84, Width - 21, 84);
         using (Font f = new Font("Segoe UI Semilight", 10.5f)) using (Font fs = new Font("Segoe UI Semibold", 10f)) {
@@ -1839,7 +1839,7 @@ function New-List([string]$Name, $cols, [string]$EmptyText, [bool]$Multi = $fals
 
 # ---- window ----
 $Form = New-Object System.Windows.Forms.Form
-$Form.Text = 'VHDX Boot Manager - multiple bare-metal Windows environments'
+$Form.Text = 'VHDX Manager'
 $Form.StartPosition = 'CenterScreen'
 $Form.FormBorderStyle = 'Sizable'
 $Form.MaximizeBox = $true
@@ -1909,7 +1909,7 @@ $tl.Dock = 'Top'; $tl.AutoSize = $true; $tl.BackColor = $script:cWhite; $tl.Colu
 [void]$tl.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle('Percent', 100)))
 [void]$tl.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle('AutoSize')))
 [void]$tl.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle('AutoSize')))
-$heights = 36, 36, 36, 36, 36, 30, 30, 36, 30, 62
+$heights = 36, 36, 36, 36, 36, 30, 30, 36, 30
 $tl.RowCount = $heights.Count
 foreach ($h in $heights) { [void]$tl.RowStyles.Add((New-Object System.Windows.Forms.RowStyle('Absolute', $h))) }
 function Lbl($t) { $l = New-Label $t $script:fBody $script:cGrey; $l.Dock = 'Fill'; $l.TextAlign = 'MiddleLeft'; $l.Margin = Pad 0 0 0 0; return $l }
@@ -1924,7 +1924,7 @@ $btnBrowseIso = New-Btn 'Browse...' 'ghost' 'Pick the Windows ISO file. After yo
   } 100 32
 $btnBrowseIso.Anchor = 'Left'; $btnBrowseIso.Margin = Pad 0 0 8 0
 $btnRead = New-Btn 'Read editions' 'ghost' 'Mounts the ISO and lists the Windows editions inside it (the same as "dism /Get-WimInfo" in the guide). Pro is selected automatically.' { Read-Editions } 124 32
-$btnRead.Anchor = 'Left'; $btnRead.Margin = Pad 0 0 0 0
+$btnRead.Anchor = 'Left'; $btnRead.Margin = Pad 0 0 14 0
 Put (Lbl 'Windows ISO') 0 0; Put $hIso 1 0; Put $btnBrowseIso 2 0; Put $btnRead 3 0
 
 $CmbEdition = New-Combo 'Edition' 'Which Windows edition to install into the base. Choose Pro (or Enterprise/Education): Home cannot boot from a VHDX. Your digital licence usually activates the same edition you already have on this PC.' 'Pick the ISO, then click Read editions'
@@ -1960,7 +1960,7 @@ $btnBrowseAf = New-Btn 'Browse...' 'ghost' 'Choose an external answer file. It o
     $d.Filter = 'Answer file (*.xml)|*.xml|All files (*.*)|*.*'
     if ($d.ShowDialog($script:Form) -eq [System.Windows.Forms.DialogResult]::OK) { $script:TxtAnswer.Text = $d.FileName }
   } 100 32
-$btnBrowseAf.Anchor = 'Left'; $btnBrowseAf.Margin = Pad 0 0 0 0
+$btnBrowseAf.Anchor = 'Left'; $btnBrowseAf.Margin = Pad 0 0 14 0
 Put (Lbl 'Answer file') 0 7; Put $hAns 1 7; Put $btnBrowseAf 2 7 2
 
 $ChkIsoAnswer = New-Check 'Pick the ISO and click "Read editions" to look for an autounattend.xml' $false 'Use answer file from ISO' 'Many custom ISOs contain autounattend.xml in the root. Normally only Windows Setup reads it; this tool applies the image directly, so it copies the file (and sources\$OEM$ folders, if present) into the new Windows itself. A file chosen with Browse overrides this.'
@@ -1976,7 +1976,14 @@ $bSys = New-Btn 'Copy sysprep command' 'ghost' "Copies this command to the clipb
   } 190 42
 $bSys.Radius = 10
 $bFlow.Controls.Add($BtnCreate); $bFlow.Controls.Add($bSys)
-Put $bFlow 1 9 3
+# the action buttons are pinned to the bottom of the page so they never scroll out of view
+$actPanel = New-Object System.Windows.Forms.Panel
+$actPanel.Dock = 'Bottom'; $actPanel.Height = 58; $actPanel.BackColor = $script:cWhite; $actPanel.Padding = Pad 124 0 0 0
+$bFlow.Padding = Pad 0 6 0 0; $bFlow.WrapContents = $false
+$actPanel.Controls.Add($bFlow)
+$script:actPanel = $actPanel
+# narrow window: drop the left indent so both buttons stay on one line
+$actPanel.Add_Resize({ param($s, $e) $l = $(if ($s.ClientSize.Width -ge 600) { 124 } else { 0 }); if ($s.Padding.Left -ne $l) { $s.Padding = Pad $l 0 0 0 } })
 
 $StepsBox = New-Label ("AFTER THE BASE IS CREATED`r`n`r`n" +
     "1.  Restart and pick the base in the boot menu (the tool offers to do this for you).`r`n`r`n" +
@@ -1990,8 +1997,11 @@ $stepsSep = New-Object System.Windows.Forms.Panel; $stepsSep.Dock = 'Left'; $ste
 $sideBox = New-Object System.Windows.Forms.Panel; $sideBox.Dock = 'Right'; $sideBox.Width = 291; $sideBox.BackColor = $script:cWhite
 $sideBox.Controls.Add($StepsBox); $sideBox.Controls.Add($stepsSep); $stepsSep.SendToBack()
 $script:SideBox = $sideBox
-$pBase.AutoScroll = $true
-$pBase.Controls.Add($tl); $pBase.Controls.Add($sideBox); $sideBox.SendToBack(); $tl.BringToFront()
+$scrBase = New-Object System.Windows.Forms.Panel
+$scrBase.Dock = 'Fill'; $scrBase.AutoScroll = $true; $scrBase.BackColor = $script:cWhite
+$scrBase.Controls.Add($tl)
+$pBase.Controls.Add($sideBox); $pBase.Controls.Add($actPanel); $pBase.Controls.Add($scrBase)
+$sideBox.SendToBack(); $scrBase.BringToFront()
 # small window: hide the side instructions when they would crowd the form
 $pBase.Add_Resize({ param($s, $e) $v = ($s.ClientSize.Width -ge 840); $script:SideBox.Visible = $v })
 
@@ -2231,7 +2241,7 @@ $Form.Add_Resize({
     if ($script:botCard.Height -ne $h) { $script:botCard.Height = $h; $script:DescText.Height = $(if ($small) { 54 } else { 66 }) }
   })
 $gap = New-Object System.Windows.Forms.Panel; $gap.Dock = 'Bottom'; $gap.Height = 14; $gap.BackColor = $script:cWhite
-$right = New-Object System.Windows.Forms.Panel; $right.Dock = 'Fill'; $right.BackColor = $script:cWhite; $right.Padding = Pad 24 6 24 14
+$right = New-Object System.Windows.Forms.Panel; $right.Dock = 'Fill'; $right.BackColor = $script:cWhite; $right.Padding = Pad 24 6 24 24
 $right.Controls.Add($Tabs); $right.Controls.Add($gap); $right.Controls.Add($botCard); $right.Controls.Add($top)
 $Form.Controls.Add($right); $Form.Controls.Add($Nav)
 Show-Page 0
@@ -2256,7 +2266,7 @@ function Save-Shot([string]$Path) {
 $Form.Add_Shown({
     Set-Dwm 20 0; Set-Dwm 35 0x00FFFFFF; Set-Dwm 36 0x00111111; Set-Dwm 34 0x00DDDDDD
     Invoke-Action 'Loading' {
-      Write-Log "VHDX Boot Manager started. Booted from: $(if ($running) { $running } else { 'physical disk' })"
+      Write-Log "VHDX Manager started. Booted from: $(if ($running) { $running } else { 'physical disk' })"
       Update-All
       Invoke-SystemCheck
     }
