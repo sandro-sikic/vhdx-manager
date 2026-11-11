@@ -27,7 +27,6 @@ jobs:
         run: |
           name="vhdx-manager-${TAG}"
           git archive --format=zip --prefix="${name}/" -o "${name}.zip" HEAD
-          git archive --format=tar.gz --prefix="${name}/" -o "${name}.tar.gz" HEAD
 
       - name: Create release
         run: |
@@ -39,5 +38,4 @@ jobs:
             --target "$(git rev-parse HEAD)" \
             --generate-notes \
             --title "$TAG" \
-            "vhdx-manager-${TAG}.zip" \
-            "vhdx-manager-${TAG}.tar.gz"
+            "vhdx-manager-${TAG}.zip"
