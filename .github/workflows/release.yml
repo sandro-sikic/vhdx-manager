@@ -26,7 +26,7 @@ jobs:
       - name: Package whole repository
         run: |
           name="vhdx-manager-${TAG}"
-          git archive --format=zip --prefix="${name}/" -o "${name}.zip" HEAD
+          git archive --format=zip --prefix="${name}/" -o "${name}.zip" HEAD -- . ':(exclude).github'
 
       - name: Create release
         run: |
