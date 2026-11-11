@@ -125,8 +125,8 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -File manager.ps1 -NoElev
 2. **Page title** - the page you are on.
 3. **VHD folder bar** - where all files are kept (default `C:\VHD`). Buttons: **Browse...**, **Open in Explorer**, **Refresh everything**.
 4. **Main area** - the list or form of the current page (here: the list of environments).
-5. **Action buttons** - orange = main action, white = normal, dashed outline = destructive (needs confirmation).
-6. **Description panel** - hover over any button or field and its explanation appears here. Selecting an environment shows a summary of it.
+5. **Action buttons** - every button has a small icon and the rows stay pinned below the list. Orange = main action, white = normal, dashed outline = destructive (needs confirmation).
+6. **Description panel** - hover over any button or field and its explanation appears here (when nothing is hovered it describes the page). Selecting an environment shows a summary of it.
 7. **Log** - every action is written here with a time stamp (and also to `vhd-manager.log` in the VHD folder).
 
 Good to know:

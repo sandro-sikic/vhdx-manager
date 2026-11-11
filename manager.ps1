@@ -1307,9 +1307,131 @@ public static class Gfx {
     }
 }
 
+// 16px line icons for buttons (GDI+ vector, same visual language as the NavRail icons)
+public static class BtnIcons {
+    public const int Size = 16, Gap = 8;
+    static PointF P(float x, float y) { return new PointF(x, y); }
+    static void Arrow(Graphics g, Pen p, float x, float y, float dx, float dy, float len) {
+        float l = (float)Math.Sqrt(dx * dx + dy * dy); dx /= l; dy /= l;
+        double a = 0.75; // ~43 degrees
+        for (int s = -1; s <= 1; s += 2) {
+            double c = Math.Cos(a * s), n = Math.Sin(a * s);
+            float bx = (float)(-dx * c + dy * n), by = (float)(-dx * n - dy * c);
+            g.DrawLine(p, x, y, x + bx * len, y + by * len);
+        }
+    }
+    // small filled arrowhead whose base sits at (x,y), pointing along (dx,dy)
+    static void Head(Graphics g, Color c, float x, float y, float dx, float dy) {
+        float nx = -dy, ny = dx;
+        using (SolidBrush b = new SolidBrush(c))
+            g.FillPolygon(b, new PointF[] { P(x + dx * 2.6f, y + dy * 2.6f), P(x - dx * 1.4f + nx * 2.8f, y - dy * 1.4f + ny * 2.8f), P(x - dx * 1.4f - nx * 2.8f, y - dy * 1.4f - ny * 2.8f) });
+    }
+    public static void Draw(Graphics g, string name, float cx, float cy, Color c) {
+        GraphicsState st = g.Save();
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        g.TranslateTransform(cx - 8f, cy - 8f);
+        using (Pen p = new Pen(c, 1.5f)) {
+            p.StartCap = LineCap.Round; p.EndCap = LineCap.Round; p.LineJoin = LineJoin.Round;
+            switch (name) {
+                case "folder":
+                    g.DrawPolygon(p, new PointF[] { P(1.5f,3.5f), P(6f,3.5f), P(7.5f,5.2f), P(14.5f,5.2f), P(14.5f,13f), P(1.5f,13f) }); break;
+                case "folder-open":
+                    g.DrawLines(p, new PointF[] { P(13f,6.5f), P(13f,4.8f), P(7.5f,4.8f), P(6f,3f), P(1.5f,3f), P(1.5f,13f) });
+                    g.DrawPolygon(p, new PointF[] { P(1.5f,13f), P(3.6f,7.2f), P(15f,7.2f), P(12.9f,13f) }); break;
+                case "refresh": {
+                    g.DrawArc(p, 2.5f, 2.5f, 11f, 11f, 300f, 260f);
+                    Head(g, c, 2.83f, 6.12f, 0.342f, -0.94f); break; }
+                case "restore": {
+                    g.DrawArc(p, 2.5f, 2.5f, 11f, 11f, 50f, -270f);
+                    Head(g, c, 3.79f, 11.54f, 0.643f, 0.766f);
+                    g.DrawLines(p, new PointF[] { P(8f,5f), P(8f,8f), P(10.2f,9.4f) }); break; }
+                case "clock":
+                    g.DrawEllipse(p, 2f, 2f, 12f, 12f);
+                    g.DrawLines(p, new PointF[] { P(8f,4.8f), P(8f,8f), P(10.4f,9.6f) }); break;
+                case "search": case "check":
+                    g.DrawEllipse(p, 2f, 2f, 8.5f, 8.5f); g.DrawLine(p, 9f, 9f, 14f, 14f); break;
+                case "shield":
+                    using (GraphicsPath sp = new GraphicsPath()) {
+                        sp.AddLine(8f, 1.8f, 13.5f, 3.8f); sp.AddLine(13.5f, 3.8f, 13.5f, 7.5f);
+                        sp.AddBezier(13.5f, 7.5f, 13.5f, 11f, 10.5f, 13.5f, 8f, 14.5f);
+                        sp.AddBezier(8f, 14.5f, 5.5f, 13.5f, 2.5f, 11f, 2.5f, 7.5f);
+                        sp.AddLine(2.5f, 7.5f, 2.5f, 3.8f); sp.CloseFigure(); g.DrawPath(p, sp);
+                    }
+                    g.DrawLines(p, new PointF[] { P(5.3f,8f), P(7.2f,10f), P(10.7f,6f) }); break;
+                case "plus":
+                    g.DrawLine(p, 8f, 2.8f, 8f, 13.2f); g.DrawLine(p, 2.8f, 8f, 13.2f, 8f); break;
+                case "minus":
+                    g.DrawLine(p, 2.8f, 8f, 13.2f, 8f); break;
+                case "x":
+                    g.DrawLine(p, 3.5f, 3.5f, 12.5f, 12.5f); g.DrawLine(p, 12.5f, 3.5f, 3.5f, 12.5f); break;
+                case "copy":
+                    g.DrawRectangle(p, 2f, 5.5f, 8.5f, 8.5f);
+                    g.DrawLines(p, new PointF[] { P(5f,5.5f), P(5f,2f), P(14f,2f), P(14f,10.5f), P(10.5f,10.5f) }); break;
+                case "camera":
+                    g.DrawRectangle(p, 1.5f, 4.5f, 13f, 9f);
+                    g.DrawLines(p, new PointF[] { P(5.2f,4.5f), P(6.4f,2.5f), P(9.6f,2.5f), P(10.8f,4.5f) });
+                    g.DrawEllipse(p, 5.5f, 6.5f, 5f, 5f); break;
+                case "play":
+                    g.DrawPolygon(p, new PointF[] { P(4.5f,2.5f), P(13f,8f), P(4.5f,13.5f) }); break;
+                case "power":
+                    g.DrawArc(p, 2.5f, 2.5f, 11f, 11f, 310f, 280f); g.DrawLine(p, 8f, 1.5f, 8f, 7.5f); break;
+                case "star": {
+                    PointF[] s = new PointF[10];
+                    for (int i = 0; i < 10; i++) {
+                        double a = -Math.PI / 2 + i * Math.PI / 5; float r = (i % 2 == 0) ? 6.6f : 2.9f;
+                        s[i] = P(8f + r * (float)Math.Cos(a), 8.6f + r * (float)Math.Sin(a));
+                    }
+                    g.DrawPolygon(p, s); break; }
+                case "pencil":
+                    g.DrawPolygon(p, new PointF[] { P(2.5f,13.5f), P(3.2f,10f), P(10.8f,2.4f), P(13.6f,5.2f), P(6f,12.8f) });
+                    g.DrawLine(p, 9f, 4.2f, 11.8f, 7f); break;
+                case "trash":
+                    g.DrawLine(p, 2.5f, 4.5f, 13.5f, 4.5f);
+                    g.DrawLines(p, new PointF[] { P(6f,4.5f), P(6f,2.3f), P(10f,2.3f), P(10f,4.5f) });
+                    g.DrawLines(p, new PointF[] { P(3.8f,4.5f), P(4.6f,14f), P(11.4f,14f), P(12.2f,4.5f) });
+                    g.DrawLine(p, 6.6f, 7.2f, 6.6f, 11.6f); g.DrawLine(p, 9.4f, 7.2f, 9.4f, 11.6f); break;
+                case "lock": case "unlock": {
+                    using (GraphicsPath bp = Gfx.Round(new Rectangle(3, 7, 10, 7), 2)) g.DrawPath(p, bp);
+                    g.DrawLine(p, 8f, 9.6f, 8f, 11.4f);
+                    if (name == "lock") {
+                        g.DrawLine(p, 5.2f, 7f, 5.2f, 5f); g.DrawArc(p, 5.2f, 1.5f, 5.6f, 7f, 180f, 180f); g.DrawLine(p, 10.8f, 5f, 10.8f, 7f);
+                    } else {
+                        g.DrawLine(p, 5.2f, 7f, 5.2f, 5f); g.DrawArc(p, 5.2f, 1.5f, 5.6f, 7f, 180f, 180f);
+                    }
+                    break; }
+                case "resize":
+                    g.DrawLine(p, 3.5f, 12.5f, 12.5f, 3.5f);
+                    Arrow(g, p, 12.9f, 3.1f, 1f, -1f, 4.4f); Arrow(g, p, 3.1f, 12.9f, -1f, 1f, 4.4f); break;
+                case "disk":
+                    g.DrawEllipse(p, 2.5f, 1.8f, 11f, 4.4f);
+                    g.DrawLine(p, 2.5f, 4f, 2.5f, 11.8f); g.DrawLine(p, 13.5f, 4f, 13.5f, 11.8f);
+                    g.DrawArc(p, 2.5f, 9.6f, 11f, 4.4f, 0f, 180f);
+                    g.DrawArc(p, 2.5f, 5.7f, 11f, 4.4f, 0f, 180f); break;
+                case "clipboard":
+                    g.DrawLines(p, new PointF[] { P(5.5f,3.2f), P(3f,3.2f), P(3f,14.2f), P(13f,14.2f), P(13f,3.2f), P(10.5f,3.2f) });
+                    g.DrawRectangle(p, 5.5f, 1.5f, 5f, 3.2f);
+                    g.DrawLine(p, 5.5f, 8f, 10.5f, 8f); g.DrawLine(p, 5.5f, 11f, 10.5f, 11f); break;
+                case "list":
+                    g.DrawLine(p, 6f, 4f, 14f, 4f); g.DrawLine(p, 6f, 8f, 14f, 8f); g.DrawLine(p, 6f, 12f, 14f, 12f);
+                    using (SolidBrush lb = new SolidBrush(c)) { g.FillEllipse(lb, 1.2f, 3.2f, 1.8f, 1.8f); g.FillEllipse(lb, 1.2f, 7.2f, 1.8f, 1.8f); g.FillEllipse(lb, 1.2f, 11.2f, 1.8f, 1.8f); }
+                    break;
+                case "download":
+                    g.DrawLine(p, 8f, 2f, 8f, 10f); g.DrawLines(p, new PointF[] { P(4.5f,6.8f), P(8f,10.2f), P(11.5f,6.8f) });
+                    g.DrawLines(p, new PointF[] { P(2f,11f), P(2f,14f), P(14f,14f), P(14f,11f) }); break;
+                case "save":
+                    g.DrawPolygon(p, new PointF[] { P(2.5f,2f), P(11.8f,2f), P(14f,4.2f), P(14f,14f), P(2.5f,14f) });
+                    g.DrawLines(p, new PointF[] { P(5f,2f), P(5f,5.5f), P(10.5f,5.5f), P(10.5f,2f) });
+                    g.DrawLines(p, new PointF[] { P(4.8f,14f), P(4.8f,9.5f), P(11.7f,9.5f), P(11.7f,14f) }); break;
+            }
+        }
+        g.Restore(st);
+    }
+}
+
 public class RBtn : Button {
     public string Kind = "ghost";
     public int Radius = 8;
+    public string Icon = "";
     bool hot, down;
     public RBtn() {
         SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw | ControlStyles.Selectable, true);
@@ -1345,6 +1467,18 @@ public class RBtn : Button {
             if (hasFill) using (SolidBrush b = new SolidBrush(fill)) g.FillPath(b, p);
             using (Pen pen = new Pen(border, 1f)) { if (dashed) pen.DashStyle = DashStyle.Dash; g.DrawPath(pen, p); }
         }
+        if (!string.IsNullOrEmpty(Icon)) {
+            TextFormatFlags tf = TextFormatFlags.NoPadding | TextFormatFlags.SingleLine | TextFormatFlags.NoPrefix;
+            int tw = TextRenderer.MeasureText(g, Text, Font, new Size(int.MaxValue, 100), tf).Width;
+            int gap = BtnIcons.Gap, avail = Width - 12;
+            if (BtnIcons.Size + gap + tw > avail) gap = 5;
+            int gw = Math.Min(BtnIcons.Size + gap + tw, avail);
+            int x0 = (Width - gw) / 2;
+            BtnIcons.Draw(g, Icon, x0 + BtnIcons.Size / 2f, Height / 2f, text);
+            int tx = x0 + BtnIcons.Size + gap;
+            TextRenderer.DrawText(g, Text, Font, new Rectangle(tx, 0, Math.Max(1, x0 + gw - tx + 2), Height), text,
+                tf | TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+        } else
         TextRenderer.DrawText(g, Text, Font, ClientRectangle, text,
             TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine | TextFormatFlags.NoPrefix | TextFormatFlags.EndEllipsis);
         if (Focused && ShowFocusCues && Enabled) {
@@ -1663,11 +1797,24 @@ $script:penHair2 = New-Object System.Drawing.Pen((C '#EAEAEA'))
 
 # ---- control factories ----
 # Rounded button; same click behaviour as before: Invoke-Action <button text> <action>
-function New-Btn([string]$Text, [string]$Kind, [string]$HelpText, [scriptblock]$Action, [int]$W = 0, [int]$H = 32) {
+# default icon per button label (used when New-Btn is not given an explicit -Icon)
+$script:BtnIconMap = @{
+  'Browse...' = 'folder-open'; 'Open in Explorer' = 'folder-open'; 'Refresh everything' = 'refresh'; 'Refresh' = 'refresh'
+  'Run system check' = 'shield'; 'Read editions' = 'list'; 'Create base VHDX' = 'disk'; 'Copy sysprep command' = 'clipboard'
+  'New environment from selected' = 'plus'; 'Make standalone copy' = 'copy'; 'Snapshot' = 'camera'; 'Restore snapshot...' = 'restore'
+  'Open snapshots folder' = 'folder-open'; 'Restart into this' = 'power'; 'Set as default boot' = 'star'; 'Set as default' = 'star'
+  'Add boot menu entry' = 'plus'; 'Rename boot menu entry' = 'pencil'; 'Rename' = 'pencil'; 'Remove boot menu entries' = 'minus'
+  'Disable expand-on-boot' = 'x'; 'Change max size...' = 'resize'; 'Lock / unlock' = 'lock'; 'Reset to fresh' = 'refresh'
+  'Delete environment' = 'trash'; 'Delete entry' = 'trash'; 'Delete selected' = 'trash'; 'Set wait' = 'clock'
+  'Back up now' = 'save'; 'Restore selected...' = 'restore'; 'Open backups folder' = 'folder-open'
+}
+function New-Btn([string]$Text, [string]$Kind, [string]$HelpText, [scriptblock]$Action, [int]$W = 0, [int]$H = 32, [string]$Icon = '') {
   $b = New-Object RBtn
   $b.Text = $Text; $b.Kind = $Kind; $b.BackColor = $script:cWhite
   $b.Font = if ($Kind -eq 'primary') { $script:fBtnB } else { $script:fBtn }
-  if ($W -le 0) { $W = [System.Windows.Forms.TextRenderer]::MeasureText($Text, $b.Font).Width + 28 }
+  if (-not $Icon -and $script:BtnIconMap.ContainsKey($Text)) { $Icon = $script:BtnIconMap[$Text] }
+  if ($Icon) { $b.Icon = $Icon }
+  if ($W -le 0) { $W = [System.Windows.Forms.TextRenderer]::MeasureText($Text, $b.Font).Width + 28 + $(if ($Icon) { 24 } else { 0 }) }
   $b.Size = Sz $W $H; $b.Margin = Pad 0 0 8 0
   Add-Help $b $Text $HelpText
   $b.Tag = @{ Name = $Text; Action = $Action }
@@ -1897,9 +2044,9 @@ $top1 = New-Object System.Windows.Forms.Panel; $top1.Dock = 'Top'; $top1.Height 
 $bRun = New-Btn 'Run system check' 'primary' 'Checks everything needed before you start: your Windows edition, UEFI firmware, whether the VHD folder is on an NTFS drive with enough free space, whether that drive is BitLocker/Device-Encryption encrypted (native VHDX boot fails on encrypted drives), whether you are currently booted from a VHDX, and what is in the boot menu. It only reads information and does not change anything.' { Invoke-SystemCheck } 170 36
 $bRun.Location = Pt 0 0; $top1.Controls.Add($bRun)
 $chkInfo = New-Label 'Start here. If anything shows FAIL, fix it before creating a base (most often: the drive holding the VHD folder is encrypted - pick another drive or turn off Device Encryption in Settings > Privacy & security).' $script:fSmall $script:cGrey
-$chkInfo.Location = Pt 190 0; $chkInfo.Size = Sz 400 64
+$chkInfo.Location = Pt 214 0; $chkInfo.Size = Sz 400 64
 $top1.Controls.Add($chkInfo); $script:chkInfo = $chkInfo
-$top1.Add_Resize({ param($s, $e) $script:chkInfo.Width = [Math]::Max(100, $s.ClientSize.Width - 190) })
+$top1.Add_Resize({ param($s, $e) $script:chkInfo.Width = [Math]::Max(100, $s.ClientSize.Width - 214) })
 $pCheck.Controls.Add($CheckOutHost); $pCheck.Controls.Add($top1); $CheckOutHost.BringToFront()
 
 # ======================= PAGE 2: CREATE BASE =======================
@@ -2015,6 +2162,15 @@ $rp = New-Object System.Windows.Forms.Panel; $rp.Dock = 'Bottom'; $rp.Height = 1
 $rp.Add_Paint({ param($s, $e) $e.Graphics.DrawLine($script:penHair, 0, 0, $s.Width, 0) })
 $script:envLayout = {
   param($s, $e)
+  # narrow window: buttons drop their icons (and the 24px they add) so fewer rows wrap and the list keeps its height
+  $narrow = ($s.ClientSize.Width -lt 700)
+  if ($null -eq $script:envIcons) { $script:envIcons = @{} }
+  foreach ($c in $s.Controls) {
+    if ($c -isnot [RBtn]) { continue }
+    $k = $c.GetHashCode()
+    if ($narrow -and $c.Icon -and -not $script:envIcons.ContainsKey($k)) { $script:envIcons[$k] = $c.Icon; $c.Icon = ''; $c.Width -= 24 }
+    elseif (-not $narrow -and $script:envIcons.ContainsKey($k)) { $c.Icon = $script:envIcons[$k]; $c.Width += 24; $script:envIcons.Remove($k) }
+  }
   $y = 12; $x = 0
   foreach ($c in $s.Controls) {
     if ($c.Tag -is [string] -and $c.Tag -eq 'grp') { if ($x -gt 0) { $y += 32 }; $c.Location = Pt 0 ($y + 0); $x = 100 }
