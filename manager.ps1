@@ -5,8 +5,7 @@
     Windows environments from VHDX files (Windows "native VHD boot").
 
 .DESCRIPTION
-    Companion to windows-vhdx-native-boot-guide.md. Every step of that guide is
-    a button here:
+    Every step of the native-boot workflow has its own page in the sidebar:
       1. Check system      - edition, UEFI, BitLocker, disk space
       2. Create base       - ISO -> new VHDX -> Windows applied -> boot menu entry
       3. Environments      - create / snapshot / restore / reset / copy / delete
@@ -18,14 +17,15 @@
 .NOTES
     Run it with either of these:
       * Right-click the file > "Run with PowerShell"
-      * powershell.exe -ExecutionPolicy Bypass -File .\VhdxBootManager.ps1
-    If you downloaded it, first run:  Unblock-File .\VhdxBootManager.ps1
+      * powershell.exe -ExecutionPolicy Bypass -File .\manager.ps1
+    If you downloaded it, first run:  Unblock-File .\manager.ps1
     The script asks for administrator rights (needed for diskpart, dism and bcdedit).
     Before every change to the boot menu it saves a timestamped backup of the
-    boot configuration into <VHD folder>\bcd-backups (restore it on tab 5).
+    boot configuration into <VHD folder>\bcd-backups (restore it on page 5).
 #>
 # Test-only switches: -NoElevate skips the elevate/relaunch block; -AutoCloseSeconds N closes the window after N s;
 # -ScreenshotDir <dir> saves page1..page5.png of the window and closes.
+# -VhdFolder <dir> uses that folder as a temporary location for this run only (config.json is neither read nor written).
 param([switch]$NoElevate, [int]$AutoCloseSeconds = 0, [string]$ScreenshotDir = '', [string]$VhdFolder = '')
 
 # --------------------------------------------------------------------------
@@ -102,7 +102,7 @@ function Read-Text([string]$Prompt, [string]$Title, [string]$Default = '') {
 
 function Set-Busy([bool]$Busy) {
   $script:Tabs.Enabled = -not $Busy
-  $script:TopPanel.Enabled = -not $Busy
+  $script:Nav.Enabled = -not $Busy     # sidebar: page items and the VHD locations list
   if ($Busy) { $script:Form.Cursor = [System.Windows.Forms.Cursors]::WaitCursor }
   else { $script:Form.Cursor = [System.Windows.Forms.Cursors]::Default }
   [System.Windows.Forms.Application]::DoEvents()
@@ -225,10 +225,16 @@ function Invoke-Bcd([string[]]$A) {
 # ==========================================================================
 #  Paths, drive letters, metadata
 # ==========================================================================
-function Get-VhdFolder {
-  $f = $script:TxtFolder.Text.Trim().TrimEnd('\')
+function Assert-VhdFolderPath([string]$f) {
   if ($f -notmatch '^[A-Za-z]:\\.+') { throw 'The VHD folder must be a full local folder path, for example C:\VHD (not a drive root).' }
   if ($f -match "[^\x20-\x7E]|['`"]") { throw 'Please use a VHD folder path with plain English letters only (no accents or quotes) - diskpart and bcdedit need that.' }
+}
+
+# $script:TxtFolder (a hidden TextBox, never added to the form) holds the active folder; empty = no location active.
+function Get-VhdFolder {
+  $f = $script:TxtFolder.Text.Trim().TrimEnd('\')
+  if (-not $f) { throw 'Pick a folder first (Browse in the VHD locations section).' }
+  Assert-VhdFolderPath $f
   if (-not (Test-Path -LiteralPath $f)) {
     New-Item -ItemType Directory -Path $f -Force | Out-Null
     Write-Log "Created folder $f"
@@ -564,15 +570,16 @@ function Invoke-SystemCheck {
   $sb = New-Object System.Text.StringBuilder
   $add = { param($s, $m) [void]$sb.AppendLine(('[{0,-4}] {1}' -f $s, $m)) }
 
-  & $add 'OK' 'Running as administrator.'
+  if ($isAdmin) { & $add 'OK' 'Running as administrator.' }
+  else { & $add 'WARN' 'Not running as administrator. Most actions will fail; start the tool with Start VHDX Manager.cmd and accept the UAC prompt.' }
   $os = Get-CimInstance Win32_OperatingSystem
   & $add 'OK' ("This Windows: {0} (build {1})" -f $os.Caption, $os.BuildNumber)
   if ($os.Caption -match 'Home') {
-    & $add 'WARN' 'Home edition. The Windows you put INSIDE the VHDX must be Pro, Enterprise or Education (pick that edition in step 2).'
+    & $add 'WARN' 'Home edition. The Windows you put INSIDE the VHDX must be Pro, Enterprise or Education (pick that edition on the Create base page).'
   }
 
   if ($env:firmware_type -eq 'UEFI') { & $add 'OK' 'Firmware: UEFI.' }
-  else { & $add 'WARN' "Firmware: $($env:firmware_type). This tool and guide assume UEFI." }
+  else { & $add 'WARN' "Firmware: $($env:firmware_type). This tool assumes UEFI." }
 
   $running = Get-RunningVhd
   if ($running) { & $add 'INFO' "You are currently booted from a VHDX: $running" }
@@ -606,7 +613,7 @@ function Invoke-SystemCheck {
   [void]$sb.AppendLine('and Windows version upgrades (e.g. 24H2 -> 25H2) cannot be installed in place:')
   [void]$sb.AppendLine('build a new base from the new ISO instead. Monthly updates work normally.')
   $script:CheckOut.Text = $sb.ToString()
-  Write-Log 'System check complete (see the Check tab).'
+  Write-Log 'System check complete (see the Check system page).'
 }
 
 # ==========================================================================
@@ -800,7 +807,7 @@ function New-BaseVhdx {
 
   $setupHint = 'Finish Windows setup,'
   if ($answer) { $setupHint = 'Windows setup runs using your answer file (check it completes),' }
-  $next = "Base created: $path`r`n`r`nNext steps:`r`n 1. Restart and choose '$label' in the boot menu.`r`n 2. $setupHint install drivers, Windows Update and the apps EVERY environment should have.`r`n 3. (Optional) run sysprep - see 'Copy sysprep command'.`r`n 4. Shut down, start your normal Windows, open this tool, go to the Environments tab, select the base and click 'New environment from selected'."
+  $next = "Base created: $path`r`n`r`nNext steps:`r`n 1. Restart and choose '$label' in the boot menu.`r`n 2. $setupHint install drivers, Windows Update and the apps EVERY environment should have.`r`n 3. (Optional) run sysprep - see 'Copy sysprep command'.`r`n 4. Shut down, start your normal Windows, open this tool, go to the Environments page, select the base and click 'New environment from selected'."
   Show-Info $next 'Base created'
   if ($g) { Start-RestartInto $g $label }
 }
@@ -877,7 +884,7 @@ function Get-SelectedEnv {
   if ($script:EnvList.SelectedItems.Count -eq 0) { throw 'Select an environment in the list first.' }
   $name = $script:EnvList.SelectedItems[0].Tag.Name
   $e = (Get-Environments) | Where-Object { $_.Name -eq $name } | Select-Object -First 1
-  if (-not $e) { throw "'$name' no longer exists. Click Refresh." }
+  if (-not $e) { throw "'$name' no longer exists. Click the active folder in the VHD locations list to refresh." }
   return $e
 }
 
@@ -1268,14 +1275,21 @@ function Update-DefaultBaseSize {
 }
 
 function Update-All {
+  Sync-LocationsUi
   try { Update-DefaultBaseSize } catch {}
+  if (-not $script:TxtFolder.Text.Trim()) {
+    # empty state: no active location - the folder-based lists are empty (the boot menu does not need a folder)
+    $script:EnvList.Items.Clear(); $script:BackupList.Items.Clear(); $script:BackupInfo.Text = ''
+    Update-BootList
+    return
+  }
   Update-EnvList
   Update-BootList
   Update-BackupList
 }
 
 # ==========================================================================
-#  GUI  (minimal rounded sidebar style - see ui-concepts\11-merged.ps1)
+#  GUI  (minimal rounded sidebar style)
 # ==========================================================================
 $cs = @'
 using System;
@@ -1696,8 +1710,48 @@ public class HList : ListView {
     }
 }
 
+public class NavIdxArgs : EventArgs { public int Index; public NavIdxArgs(int i) { Index = i; } }
+
 public class NavRail : Control {
     public string[] Items = new string[0];
+    // ---- Locations section (between the app title and the page items) ----
+    public string[] Locs = new string[0], LocTips = new string[0];
+    public bool[] LocMissing = new bool[0];
+    public int ActiveLoc = -1;
+    public bool NeedLoc = false;   // true while no location is active: the section is highlighted
+    public const int LocTop = 122, RowH = 28, MaxRows = 4;
+    int scrollRow = 0, hotLoc = -1; bool hotTrash = false, hotBrowse = false, drag = false;
+    ToolTip tt = new ToolTip();
+    public event EventHandler<NavIdxArgs> LocClick, LocRemove, LocHover;   // LocHover: -2 = Browse button, -3 = trash icon, else row
+    public event EventHandler BrowseClick;
+    int AreaH { get { return Locs.Length == 0 ? 44 : Math.Min(Locs.Length, MaxRows) * RowH; } }
+    bool Scrolls { get { return Locs.Length > MaxRows; } }
+    Rectangle BrowseRect { get { return new Rectangle(Width - 17 - 26, 91, 26, 26); } }
+    Rectangle RowRect(int i) { return new Rectangle(16, LocTop + (i - scrollRow) * RowH + 1, Width - 33 - (Scrolls ? 6 : 0), RowH - 2); }
+    // call after changing Locs / ActiveLoc: keeps the active row in view and moves the page items below the list
+    public void Relayout() {
+        int max = Math.Max(0, Locs.Length - MaxRows);
+        if (ActiveLoc >= 0) { if (ActiveLoc < scrollRow) scrollRow = ActiveLoc; else if (ActiveLoc >= scrollRow + MaxRows) scrollRow = ActiveLoc - MaxRows + 1; }
+        scrollRow = Math.Max(0, Math.Min(max, scrollRow));
+        Top0 = LocTop + AreaH + 14; hotLoc = -1; hotTrash = false;
+        Invalidate();
+    }
+    void HitLoc(Point p, out int row, out bool trash, out bool browse) {
+        row = -1; trash = false; browse = BrowseRect.Contains(p);
+        if (browse || Locs.Length == 0 || p.Y < LocTop || p.Y >= LocTop + AreaH) return;
+        int i = scrollRow + (p.Y - LocTop) / RowH;
+        if (i < 0 || i >= Locs.Length) return;
+        Rectangle r = RowRect(i);
+        if (p.X < r.X || p.X >= r.Right) return;
+        row = i; trash = p.X >= r.Right - 26;
+    }
+    void DragTo(int y) {
+        int max = Math.Max(0, Locs.Length - MaxRows); if (max == 0) return;
+        int th = Math.Max(16, AreaH * MaxRows / Locs.Length);
+        double f = (double)(y - LocTop - th / 2) / Math.Max(1, AreaH - th);
+        int s = (int)Math.Round(f * max); s = Math.Max(0, Math.Min(max, s));
+        if (s != scrollRow) { scrollRow = s; Invalidate(); }
+    }
     public string Sub = "", Footer = "";
     static Font Fit(string text, string face, float start, float min, int maxW) {
         float s = start;
@@ -1705,11 +1759,12 @@ public class NavRail : Control {
         return new Font(face, s);
     }
     public int Selected = 0; int hot = -1;
-    public int Top0 = 104, ItemH = 46;
+    public int Top0 = 180, ItemH = 46;
     public event EventHandler SelectedChanged;
     public void Pick(int i) { if (Selected != i) { Selected = i; Invalidate(); if (SelectedChanged != null) SelectedChanged(this, EventArgs.Empty); } }
     public NavRail() {
         SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
+        SetStyle(ControlStyles.Selectable, true); TabStop = false;
         BackColor = Gfx.C("#FAFAFA"); Cursor = Cursors.Hand;
     }
     void Icon(Graphics g, int i, float cx, float cy, Color c) {
@@ -1750,6 +1805,8 @@ public class NavRail : Control {
         using (Font f1 = Fit("VHDX Manager", "Segoe UI Semibold", 11f, 8.5f, tw)) TextRenderer.DrawText(g, "VHDX Manager", f1, new Rectangle(70, 28, tw, 20), ink, TextFormatFlags.NoPadding | TextFormatFlags.VerticalCenter);
         using (Font f2 = Fit(Sub, "Segoe UI Semilight", 9f, 7.5f, tw)) TextRenderer.DrawText(g, Sub, f2, new Rectangle(70, 48, tw, 16), grey, TextFormatFlags.NoPadding | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
         using (Pen hp = new Pen(hair)) g.DrawLine(hp, 20, 84, Width - 21, 84);
+        PaintLocations(g, on, ink, grey, hair);
+        using (Pen hp = new Pen(hair)) g.DrawLine(hp, 20, Top0 - 7, Width - 21, Top0 - 7);
         using (Font f = new Font("Segoe UI Semilight", 10.5f)) using (Font fs = new Font("Segoe UI Semibold", 10f)) {
             for (int i = 0; i < Items.Length; i++) {
                 int y = Top0 + i * ItemH; bool sel = (i == Selected);
@@ -1764,10 +1821,94 @@ public class NavRail : Control {
         }
         using (Font f3 = new Font("Segoe UI Semilight", 8.5f)) TextRenderer.DrawText(g, Footer, f3, new Rectangle(24, Height - 36, Width - 40, 20), grey, TextFormatFlags.NoPadding | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
     }
+    void PaintLocations(Graphics g, bool on, Color ink, Color grey, Color hair) {
+        Color dim = Gfx.C("#A0A0A0");
+        Color accent = Gfx.C("#E04500");
+        bool need = NeedLoc && on;   // no location is active: highlight this whole section
+        if (need) {
+            using (GraphicsPath np = Gfx.Round(new Rectangle(10, 84, Width - 22, LocTop + AreaH + 2 - 84), 10)) {
+                using (SolidBrush nb = new SolidBrush(Gfx.C("#FFF1EA"))) g.FillPath(nb, np);
+                using (Pen npn = new Pen(Gfx.C("#FF4F00"), 1.5f)) g.DrawPath(npn, np);
+            }
+        }
+        using (Font fh = new Font("Segoe UI Semibold", 8f)) TextRenderer.DrawText(g, "VHD LOCATIONS", fh, new Rectangle(24, 91, 120, 26), need ? accent : on ? grey : dim, TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix | TextFormatFlags.VerticalCenter);
+        Rectangle br = BrowseRect;
+        using (GraphicsPath bp = Gfx.Round(new Rectangle(br.X, br.Y, br.Width - 1, br.Height - 1), 7)) {
+            bool h = hotBrowse && on;
+            if (need) using (SolidBrush ob = new SolidBrush(h ? Gfx.C("#E04500") : Gfx.C("#FF4F00"))) g.FillPath(ob, bp);
+            else if (h) using (SolidBrush hb = new SolidBrush(Gfx.C("#F7F7F7"))) g.FillPath(hb, bp);
+            using (Pen bpn = new Pen(need ? Gfx.C("#FF4F00") : h ? ink : Gfx.C("#BDBDBD"))) g.DrawPath(bpn, bp);
+        }
+        BtnIcons.Draw(g, "folder-open", br.X + br.Width / 2f, br.Y + br.Height / 2f, need ? Color.White : on ? ink : dim);
+        if (Locs.Length == 0) {
+            using (Font fe = new Font("Segoe UI Semibold", 8.75f))
+                TextRenderer.DrawText(g, need ? "Not set - click Browse to pick the folder for your VHDX files" : "No folders yet - click Browse to pick one", fe, new Rectangle(24, LocTop, Width - 24 - 24, 44), need ? accent : on ? grey : dim, TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix | TextFormatFlags.WordBreak);
+            return;
+        }
+        g.SetClip(new Rectangle(0, LocTop, Width - 1, AreaH));
+        using (Font f = new Font("Segoe UI Semilight", 9.5f)) using (Font fs = new Font("Segoe UI Semibold", 9.5f)) {
+            for (int i = scrollRow; i < Locs.Length && i < scrollRow + MaxRows; i++) {
+                Rectangle r = RowRect(i); bool sel = (i == ActiveLoc), miss = (i < LocMissing.Length && LocMissing[i]);
+                if (sel) using (GraphicsPath sp = Gfx.Round(r, 7)) { using (SolidBrush sb = new SolidBrush(Color.White)) g.FillPath(sb, sp); using (Pen sq = new Pen(hair)) g.DrawPath(sq, sp); }
+                else if (i == hotLoc && on) using (GraphicsPath hpth = Gfx.Round(r, 7)) using (SolidBrush hb = new SolidBrush(Gfx.C("#EFEFEF"))) g.FillPath(hb, hpth);
+                if (sel) using (GraphicsPath ap = Gfx.Round(new Rectangle(5, r.Y + r.Height / 2 - 7, 4, 14), 2)) using (SolidBrush ab = new SolidBrush(on ? Gfx.C("#FF4F00") : Gfx.C("#F7C2AA"))) g.FillPath(ab, ap);
+                Color c = !on ? dim : miss ? Gfx.C("#9A9A9A") : sel ? ink : Gfx.C("#555555");
+                TextRenderer.DrawText(g, Locs[i], sel ? fs : f, new Rectangle(r.X + 12, r.Y, r.Width - 12 - 28, r.Height), c, TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+                bool th = (i == hotLoc && hotTrash && on);
+                Rectangle tr = new Rectangle(r.Right - 26, r.Y + (r.Height - 22) / 2, 22, 22);
+                if (th) using (GraphicsPath tp = Gfx.Round(tr, 6)) using (SolidBrush tb = new SolidBrush(Gfx.C("#E2E2E2"))) g.FillPath(tb, tp);
+                BtnIcons.Draw(g, "trash", tr.X + tr.Width / 2f, tr.Y + tr.Height / 2f, !on ? dim : th ? ink : Gfx.C("#8A8A8A"));
+            }
+        }
+        if (Scrolls) {
+            int max = Locs.Length - MaxRows, th2 = Math.Max(16, AreaH * MaxRows / Locs.Length);
+            int ty = LocTop + (AreaH - th2) * scrollRow / max;
+            using (GraphicsPath tp = Gfx.Round(new Rectangle(Width - 10, ty, 4, th2), 2)) using (SolidBrush tb = new SolidBrush(Gfx.C("#C8C8C8"))) g.FillPath(tb, tp);
+        }
+        g.ResetClip();
+    }
     int Hit(Point p) { int i = (p.Y - Top0) / ItemH; return (p.Y >= Top0 && i >= 0 && i < Items.Length) ? i : -1; }
-    protected override void OnMouseMove(MouseEventArgs e) { int h = Hit(e.Location); if (h != hot) { hot = h; Invalidate(); } base.OnMouseMove(e); }
-    protected override void OnMouseLeave(EventArgs e) { hot = -1; Invalidate(); base.OnMouseLeave(e); }
-    protected override void OnMouseDown(MouseEventArgs e) { int h = Hit(e.Location); if (h >= 0) Pick(h); base.OnMouseDown(e); }
+    protected override void OnMouseMove(MouseEventArgs e) {
+        if (drag) { DragTo(e.Y); return; }
+        int h = Hit(e.Location); if (h != hot) { hot = h; Invalidate(); }
+        int row; bool tr, br; HitLoc(e.Location, out row, out tr, out br);
+        if (row != hotLoc || tr != hotTrash || br != hotBrowse) {
+            hotLoc = row; hotTrash = tr; hotBrowse = br; Invalidate();
+            string tip = null; int hv = -1;
+            if (br) { tip = "Add a folder (Browse...)"; hv = -2; }
+            else if (row >= 0) {
+                if (tr) { tip = "Remove from the list (the folder and its files are not deleted)"; hv = -3; }
+                else { tip = row < LocTips.Length ? LocTips[row] : Locs[row]; hv = row; }
+            }
+            if (tip != null) { tt.Show(tip, this, Math.Min(e.X + 14, Math.Max(0, Width - 40)), e.Y + 22, 6000); if (LocHover != null) LocHover(this, new NavIdxArgs(hv)); }
+            else tt.Hide(this);
+        }
+        base.OnMouseMove(e);
+    }
+    protected override void OnMouseLeave(EventArgs e) { hot = -1; hotLoc = -1; hotTrash = false; hotBrowse = false; tt.Hide(this); Invalidate(); base.OnMouseLeave(e); }
+    protected override void OnMouseUp(MouseEventArgs e) { drag = false; base.OnMouseUp(e); }
+    protected override void OnMouseWheel(MouseEventArgs e) {
+        if (Scrolls && e.Y >= LocTop && e.Y < LocTop + AreaH) {
+            int max = Locs.Length - MaxRows, s = Math.Max(0, Math.Min(max, scrollRow + (e.Delta < 0 ? 1 : -1)));
+            if (s != scrollRow) { scrollRow = s; hotLoc = -1; Invalidate(); }
+        }
+        base.OnMouseWheel(e);
+    }
+    protected override void OnMouseDown(MouseEventArgs e) {
+        if (e.Button == MouseButtons.Left) {
+            Focus();
+            if (Scrolls && e.X >= Width - 15 && e.X < Width - 1 && e.Y >= LocTop && e.Y < LocTop + AreaH) { drag = true; DragTo(e.Y); return; }
+            int row; bool tr, br; HitLoc(e.Location, out row, out tr, out br);
+            tt.Hide(this);
+            if (br) { if (BrowseClick != null) BrowseClick(this, EventArgs.Empty); return; }
+            if (row >= 0) {
+                if (tr) { if (LocRemove != null) LocRemove(this, new NavIdxArgs(row)); }
+                else if (LocClick != null) LocClick(this, new NavIdxArgs(row));
+                return;
+            }
+        }
+        int h = Hit(e.Location); if (h >= 0) Pick(h); base.OnMouseDown(e);
+    }
     protected override void OnEnabledChanged(EventArgs e) { Invalidate(); base.OnEnabledChanged(e); }
 }
 '@
@@ -1796,10 +1937,10 @@ $script:penHair = New-Object System.Drawing.Pen($script:cHair)
 $script:penHair2 = New-Object System.Drawing.Pen((C '#EAEAEA'))
 
 # ---- control factories ----
-# Rounded button; same click behaviour as before: Invoke-Action <button text> <action>
+# Rounded button: click runs Invoke-Action <button text> <action>
 # default icon per button label (used when New-Btn is not given an explicit -Icon)
 $script:BtnIconMap = @{
-  'Browse...' = 'folder-open'; 'Open in Explorer' = 'folder-open'; 'Refresh everything' = 'refresh'; 'Refresh' = 'refresh'
+  'Browse...' = 'folder-open'; 'Refresh' = 'refresh'
   'Run system check' = 'shield'; 'Read editions' = 'list'; 'Create base VHDX' = 'disk'; 'Copy sysprep command' = 'clipboard'
   'New environment from selected' = 'plus'; 'Make standalone copy' = 'copy'; 'Snapshot' = 'camera'; 'Restore snapshot...' = 'restore'
   'Open snapshots folder' = 'folder-open'; 'Restart into this' = 'power'; 'Set as default boot' = 'star'; 'Set as default' = 'star'
@@ -2030,7 +2171,7 @@ function Save-WindowState {
   catch {}
 }
 
-# ---- page host (replaces the tab control; the sidebar picks the page) ----
+# ---- page host (the sidebar picks the page) ----
 $Tabs = New-Object System.Windows.Forms.Panel; $Tabs.Dock = 'Fill'; $Tabs.BackColor = $script:cWhite
 $script:Tabs = $Tabs
 $pCheck = New-Page; $pBase = New-Page; $pEnv = New-Page; $pBoot = New-Page; $pBackup = New-Page
@@ -2070,7 +2211,7 @@ $btnBrowseIso = New-Btn 'Browse...' 'ghost' 'Pick the Windows ISO file. After yo
     if ($d.ShowDialog($script:Form) -eq [System.Windows.Forms.DialogResult]::OK) { $script:TxtIso.Text = $d.FileName; Read-Editions }
   } 100 32
 $btnBrowseIso.Anchor = 'Left'; $btnBrowseIso.Margin = Pad 0 0 8 0
-$btnRead = New-Btn 'Read editions' 'ghost' 'Mounts the ISO and lists the Windows editions inside it (the same as "dism /Get-WimInfo" in the guide). Pro is selected automatically.' { Read-Editions } 124 32
+$btnRead = New-Btn 'Read editions' 'ghost' 'Mounts the ISO and lists the Windows editions inside it (the same as "dism /Get-WimInfo"). Pro is selected automatically.' { Read-Editions } 124 32
 $btnRead.Anchor = 'Left'; $btnRead.Margin = Pad 0 0 14 0
 Put (Lbl 'Windows ISO') 0 0; Put $hIso 1 0; Put $btnBrowseIso 2 0; Put $btnRead 3 0
 
@@ -2115,7 +2256,7 @@ $ChkIsoAnswer.Enabled = $false; $script:ChkIsoAnswer = $ChkIsoAnswer
 Put $ChkIsoAnswer 1 8 3
 
 $bFlow = New-Flow; $bFlow.Dock = 'Fill'; $bFlow.Margin = Pad 0 0 0 0; $bFlow.Padding = Pad 0 8 0 0
-$BtnCreate = New-Btn 'Create base VHDX' 'primary' 'Does guide steps 2-5 in one go: creates the virtual disk file in the VHD folder, partitions and formats it, installs the chosen Windows edition into it with DISM (5-15 minutes), applies the answer file and the optional no-expand setting, detaches it and adds a boot menu entry, without changing your default Windows. A backup of the boot configuration is saved first.' { New-BaseVhdx } 230 42
+$BtnCreate = New-Btn 'Create base VHDX' 'primary' 'Does everything in one go: creates the virtual disk file in the VHD folder, partitions and formats it, installs the chosen Windows edition into it with DISM (5-15 minutes), applies the answer file and the optional no-expand setting, detaches it and adds a boot menu entry, without changing your default Windows. A backup of the boot configuration is saved first.' { New-BaseVhdx } 230 42
 $BtnCreate.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 10.5); $BtnCreate.Radius = 10; $BtnCreate.Margin = Pad 0 0 14 0
 $bSys = New-Btn 'Copy sysprep command' 'ghost' "Copies this command to the clipboard:`r`n$SysprepCmd`r`nOptional: run it in an administrator Command Prompt INSIDE the base, as the last thing before you create environments. It gives every environment its own unique identity (recommended if several will be on the network or join a domain). The base then shuts down; each environment runs a short setup on its first boot." {
     [System.Windows.Forms.Clipboard]::SetText($SysprepCmd)
@@ -2213,7 +2354,7 @@ $rp.Controls.Add((New-Btn 'Remove boot menu entries' 'ghost' 'Removes the select
     if (-not $e.Boot.Count) { throw "'$($e.Name)' is not in the boot menu." }
     if (-not (Confirm-Action "Remove '$($e.Name)' from the boot menu? (The file is kept.)")) { return }
     foreach ($b in $e.Boot) { Invoke-Bcd @('/delete', $b.Id) | Out-Null; Write-Log "Removed '$($b.Description)'." }; Update-All }))
-$rp.Controls.Add((New-Btn 'Disable expand-on-boot' 'ghost' 'Stops the selected environment from growing its file to the full maximum size while it is booted, using the registry setting VirtualDiskExpandOnMount=4 (guide step 9). Not needed if you ticked the option when creating the base. Risk: if the physical drive fills up, that Windows crashes.' { Disable-EnvExpand; Update-All }))
+$rp.Controls.Add((New-Btn 'Disable expand-on-boot' 'ghost' 'Stops the selected environment from growing its file to the full maximum size while it is booted, using the registry setting VirtualDiskExpandOnMount=4. Not needed if you ticked the option when creating the base. Risk: if the physical drive fills up, that Windows crashes.' { Disable-EnvExpand; Update-All }))
 Add-EnvGroup 'Manage'
 $rp.Controls.Add((New-Btn 'Change max size...' 'ghost' 'Changes the maximum size (the "Max" column) of a standalone disk, or of a base nobody is built on. Growing enlarges the virtual disk and extends the Windows partition inside it automatically. Shrinking needs the Hyper-V PowerShell module and is only possible if the data inside fits. Environments built on a base (differencing disks) cannot be resized: use "Make standalone copy" first. Not allowed for the running Windows or a locked disk, and the disk must not be in use.' { Set-EnvMaxSize; Update-All }))
 $rp.Controls.Add((New-Btn 'Lock / unlock' 'ghost' 'Lock = make the file read-only and remove it from the boot menu, so it cannot be changed. Do this for a base once environments are built on it. Unlock makes it writable again, which is only allowed when nothing is built on it.' { Switch-EnvLock; Update-All }))
@@ -2323,50 +2464,204 @@ $Form.Add_KeyDown({
     if ($e.Control -and $e.KeyValue -ge 49 -and $e.KeyValue -le 53 -and $script:Tabs.Enabled) { Show-Page ($e.KeyValue - 49); $e.Handled = $true }
   })
 
-# ---- top bar: page title + VHD folder ----
-$top = New-Object System.Windows.Forms.Panel; $top.Dock = 'Top'; $top.Height = 92; $top.BackColor = $script:cWhite
+# ---- page title (top of the content area) ----
+$top = New-Object System.Windows.Forms.Panel; $top.Dock = 'Top'; $top.Height = 48; $top.BackColor = $script:cWhite
 $top.Add_Paint({ param($s, $e) $e.Graphics.DrawLine($script:penHair, 0, $s.Height - 1, $s.Width, $s.Height - 1) })
 $PageTitle = New-Label 'Check system' (New-Object System.Drawing.Font('Segoe UI Light', 20)) $script:cInk
 $PageTitle.Dock = 'Top'; $PageTitle.Height = 42; $PageTitle.TextAlign = 'MiddleLeft'
 $script:PageTitle = $PageTitle
-$row = New-Object System.Windows.Forms.Panel; $row.Dock = 'Top'; $row.Height = 44; $row.BackColor = $script:cWhite
-$vl = New-Label 'VHD folder' $script:fBody $script:cGrey; $vl.Location = Pt 0 6; $vl.Size = Sz 90 32; $vl.TextAlign = 'MiddleLeft'
-$TopPanel = New-Object System.Windows.Forms.Panel
-$TopPanel.BackColor = $script:cWhite; $TopPanel.Location = Pt 92 0; $TopPanel.Size = Sz 500 44
-$script:TopPanel = $TopPanel
-$hFolder = New-Text 'C:\VHD' 'VHD folder' 'Where all environment files (.vhdx), snapshots, boot-config backups and the log are kept. Must be on an NTFS drive that is NOT BitLocker-encrypted. Default: C:\VHD. Inside a VHDX-booted Windows the physical drive has a different letter (often D:), and the tool detects that automatically.'
-$TxtFolder = $hFolder.Inner; $script:TxtFolder = $TxtFolder
-$hFolder.Dock = 'None'; $hFolder.Margin = Pad 0 0 0 0
+$top.Controls.Add($PageTitle)
+
+# ---- Locations: the saved VHD folders shown at the top of the sidebar ----
+# $script:TxtFolder is a hidden TextBox (never added to the form) that holds the ACTIVE folder; everything else reads it
+# through Get-VhdFolder. Empty text = no active location (empty state).
+$TxtFolder = New-Object System.Windows.Forms.TextBox; $script:TxtFolder = $TxtFolder
 $TxtFolder.Add_TextChanged({ try { Update-DefaultBaseSize } catch {} })
-$TxtFolder.Add_Leave({ try { Update-All } catch { Write-Log "ERROR: $($_.Exception.Message)" } })
-$fl = New-Flow; $fl.AutoSize = $true; $fl.WrapContents = $false; $fl.Margin = Pad 0 0 0 0; $fl.Padding = Pad 0 0 0 0
-$b1 = New-Btn 'Browse...' 'ghost' 'Choose a different folder to store the VHDX files in.' {
+$script:Locations = @()          # saved folder paths, in list order
+$script:ActiveLocation = ''      # path of the active one ('' = none)
+$script:LocLabels = @()
+$script:ConfigPersist = -not $VhdFolder     # -VhdFolder (test/demo) runs never read or write config.json
+$script:CfgNoted = $false
+$script:ScriptDir = $PSScriptRoot
+if (-not $script:ScriptDir -and $PSCommandPath) { $script:ScriptDir = Split-Path $PSCommandPath -Parent }
+if (-not $script:ScriptDir) { $script:ScriptDir = (Get-Location).Path }
+$script:CfgPrimary = Join-Path $script:ScriptDir 'config.json'
+$script:CfgFallback = Join-Path $env:APPDATA 'VhdxBootManager\config.json'
+
+function Format-LocPath([string]$p) { return $p.Trim().Trim('"').TrimEnd('\') }
+function Test-LocationExists([string]$p) { try { return (Test-Path -LiteralPath $p -PathType Container) } catch { return $false } }
+function Find-Location([string]$p) {
+  $k = Format-LocPath $p
+  for ($i = 0; $i -lt $script:Locations.Count; $i++) { if ((Format-LocPath $script:Locations[$i]) -ieq $k) { return $i } }
+  return -1
+}
+# first existing location from $Start to the end of the list, then backwards from $Start-1; -1 if none exists
+function Get-LocationFallback([int]$Start) {
+  $n = $script:Locations.Count
+  for ($i = $Start; $i -lt $n; $i++) { if ($i -ge 0 -and (Test-LocationExists $script:Locations[$i])) { return $i } }
+  for ($i = [Math]::Min($Start, $n) - 1; $i -ge 0; $i--) { if (Test-LocationExists $script:Locations[$i]) { return $i } }
+  return -1
+}
+function Set-ActiveFolder([string]$p) { $script:ActiveLocation = $p; $script:TxtFolder.Text = $p; Update-LocHighlight }
+function Update-LocHighlight {
+  if (-not $script:Nav) { return }
+  $script:Nav.NeedLoc = -not $script:TxtFolder.Text.Trim()   # highlights the sidebar section while no location is active
+  $script:Nav.Invalidate()
+}
+
+function Read-Config {
+  $f = @($script:CfgPrimary, $script:CfgFallback) | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } |
+  Sort-Object { (Get-Item -LiteralPath $_).LastWriteTime } -Descending | Select-Object -First 1
+  if (-not $f) { return $null }
+  try {
+    $j = Get-Content -LiteralPath $f -Raw | ConvertFrom-Json
+    if ($null -eq $j) { throw 'the file is empty' }
+    $list = @()
+    foreach ($l in @($j.locations)) {
+      $p = ''
+      if ($l -is [string]) { $p = $l } elseif ($l -and $l.path) { $p = [string]$l.path }
+      $p = Format-LocPath $p
+      if ($p -and (@($list | Where-Object { $_ -ieq $p }).Count -eq 0)) { $list += $p }
+    }
+    return @{ Locations = $list; Active = (Format-LocPath ([string]$j.active)) }
+  }
+  catch { Write-Log "Could not read $f ($($_.Exception.Message)) - starting without saved folders."; return $null }
+}
+
+# Atomic write (temp file + move). Falls back to %APPDATA% when the script folder is not writable.
+function Save-Config {
+  if (-not $script:ConfigPersist) { return }
+  $obj = [ordered]@{ locations = @($script:Locations | ForEach-Object { [ordered]@{ path = $_ } }); active = $script:ActiveLocation }
+  $json = $obj | ConvertTo-Json -Depth 4
+  $err = ''
+  foreach ($target in @($script:CfgPrimary, $script:CfgFallback)) {
+    $tmp = $target + '.tmp'
+    try {
+      $dir = Split-Path $target -Parent
+      if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Force -Path $dir | Out-Null }
+      [IO.File]::WriteAllText($tmp, $json, (New-Object System.Text.UTF8Encoding($false)))
+      if (Test-Path -LiteralPath $target) {
+        [IO.File]::Replace($tmp, $target, ($target + '.bak'))
+        Remove-Item -LiteralPath ($target + '.bak') -Force -ErrorAction SilentlyContinue
+      }
+      else { [IO.File]::Move($tmp, $target) }
+      if ($target -eq $script:CfgFallback -and -not $script:CfgNoted) {
+        $script:CfgNoted = $true
+        Write-Log "Notice: the program folder is not writable, so the folder list is saved in $target instead."
+      }
+      return
+    }
+    catch { $err = $_.Exception.Message; Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue }
+  }
+  Write-Log "Could not save the folder list: $err"
+}
+
+function Get-LocLeaf([string]$p) { try { return [IO.Path]::GetFileName($p.TrimEnd('\')) } catch { return '' } }
+# sidebar rows: folder name; 'parent\name' when two locations share a name; full path as tooltip
+function Sync-LocationsUi {
+  if (-not $script:Nav) { return }
+  $leafs = @($script:Locations | ForEach-Object { Get-LocLeaf $_ })
+  $labels = @(); $tips = @(); $miss = @()
+  for ($i = 0; $i -lt $script:Locations.Count; $i++) {
+    $p = $script:Locations[$i]; $leaf = $leafs[$i]; $lab = $leaf
+    if (-not $leaf) { $lab = $p }
+    elseif (@($leafs | Where-Object { $_ -ieq $leaf }).Count -gt 1) {
+      $pl = ''
+      try { $dir = [IO.Path]::GetDirectoryName($p.TrimEnd('\')); if ($dir) { $pl = [IO.Path]::GetFileName($dir) } } catch {}
+      if ($pl) { $lab = "$pl\$leaf" } else { $lab = $p }
+    }
+    $gone = -not (Test-LocationExists $p)
+    $tip = $p
+    if ($gone) { $tip += "`r`n(folder not found)" }
+    if (-not $script:ConfigPersist) { $tip += "`r`n(temporary - not saved)" }
+    $labels += $lab; $tips += $tip; $miss += $gone
+  }
+  $script:LocLabels = $labels
+  $script:Nav.Locs = [string[]]$labels; $script:Nav.LocTips = [string[]]$tips; $script:Nav.LocMissing = [bool[]]$miss
+  $script:Nav.ActiveLoc = $(if ($script:ActiveLocation) { Find-Location $script:ActiveLocation } else { -1 })
+  $script:Nav.Relayout()
+}
+
+# make a saved location active, save the config and refresh everything (also used to re-read the active one)
+function Select-Location([int]$Index) {
+  if ($Index -lt 0 -or $Index -ge $script:Locations.Count) { return }
+  $p = $script:Locations[$Index]
+  if (-not (Test-LocationExists $p)) { throw "The folder $p was not found (drive disconnected, or the folder was renamed or deleted?). Remove it from the list with the trash icon, or pick another folder." }
+  Assert-VhdFolderPath $p
+  $same = ($script:ActiveLocation -and ((Format-LocPath $script:ActiveLocation) -ieq (Format-LocPath $p)))
+  Set-ActiveFolder $p
+  Save-Config
+  Update-All
+  if ($same) { Write-Log 'Refreshed.' } else { Write-Log "Active folder: $p" }
+}
+
+function Add-LocationFromDialog {
   $d = New-Object System.Windows.Forms.FolderBrowserDialog
   $d.Description = 'Folder for VHDX files (NTFS, not BitLocker-encrypted)'
-  if ($d.ShowDialog($script:Form) -eq [System.Windows.Forms.DialogResult]::OK) { $script:TxtFolder.Text = $d.SelectedPath; Update-All }
+  if ($d.ShowDialog($script:Form) -ne [System.Windows.Forms.DialogResult]::OK) { return }
+  $p = Format-LocPath $d.SelectedPath
+  Assert-VhdFolderPath $p
+  $i = Find-Location $p
+  if ($i -lt 0) {
+    $script:Locations = @($script:Locations) + @($p)
+    $i = $script:Locations.Count - 1
+    Write-Log "Added folder $p"
+  }
+  Select-Location $i
 }
-$b2 = New-Btn 'Open in Explorer' 'ghost' 'Opens the VHD folder in File Explorer.' { Start-Process explorer.exe (Get-VhdFolder) }
-$b3 = New-Btn 'Refresh everything' 'ghost' 'Re-reads the VHDX files and the boot menu. Use this after changing things outside the tool.' { Update-All; Write-Log 'Refreshed.' }
-foreach ($b in $b1, $b2, $b3) { $b.Margin = Pad 8 0 0 0; $fl.Controls.Add($b) }
-$TopPanel.Controls.Add($hFolder); $TopPanel.Controls.Add($fl)
-$script:topFl = $fl; $script:topHost = $hFolder; $script:topRow = $row; $script:topBar = $top
-# narrow window: the buttons move below the folder box
-$TopPanel.Add_Resize({
+
+# removes the entry from the list only - never touches files
+function Remove-Location([int]$Index) {
+  if ($Index -lt 0 -or $Index -ge $script:Locations.Count) { return }
+  $removed = $script:Locations[$Index]
+  $wasActive = [bool]($script:ActiveLocation -and ((Format-LocPath $removed) -ieq (Format-LocPath $script:ActiveLocation)))
+  $new = @()
+  for ($k = 0; $k -lt $script:Locations.Count; $k++) { if ($k -ne $Index) { $new += $script:Locations[$k] } }
+  $script:Locations = $new
+  Write-Log "Removed $removed from the VHD locations list (the folder and its files were not touched)."
+  if ($wasActive) {
+    $j = Get-LocationFallback $Index
+    if ($j -ge 0) { Set-ActiveFolder $script:Locations[$j]; Write-Log "Active folder: $($script:Locations[$j])" }
+    else { Set-ActiveFolder ''; Write-Log 'No active folder. Click Browse in the VHD locations section to pick one.' }
+  }
+  Save-Config
+  Update-All
+}
+
+function Initialize-Locations {
+  if ($VhdFolder) {
+    $p = Format-LocPath $VhdFolder
+    $script:Locations = @($p); Set-ActiveFolder $p
+    return
+  }
+  $cfg = Read-Config
+  if ($cfg) { $script:Locations = @($cfg.Locations) }
+  if ($script:Locations.Count -eq 0) {
+    # nothing saved: no folder is assumed - the user has to pick one (the sidebar section is highlighted)
+    $script:TxtFolder.Text = ''; Update-LocHighlight
+    Write-Log 'No VHD location is set yet. Click the Browse icon under VHD LOCATIONS (top left) to pick the folder for your VHDX files.'
+    return
+  }
+  $a = Find-Location $cfg.Active
+  if ($a -ge 0 -and (Test-LocationExists $script:Locations[$a])) { Set-ActiveFolder $script:Locations[$a]; return }
+  if ($cfg.Active) { Write-Log "The saved folder $($cfg.Active) no longer exists." }
+  $j = Get-LocationFallback $(if ($a -ge 0) { $a + 1 } else { 0 })
+  if ($j -ge 0) { Set-ActiveFolder $script:Locations[$j]; Write-Log "Using $($script:Locations[$j]) instead." }
+  else { Write-Log 'None of the saved folders exist right now. Pick another one with Browse in the VHD locations section.' }
+}
+
+$Nav.Add_BrowseClick({ Invoke-Action 'Add folder' { Add-LocationFromDialog } })
+$Nav.Add_LocClick({ param($s, $e) $locIdx = $e.Index; Invoke-Action 'Switch folder' { Select-Location $locIdx } })
+$Nav.Add_LocRemove({ param($s, $e) $locIdx = $e.Index; Invoke-Action 'Remove folder from list' { Remove-Location $locIdx } })
+$Nav.Add_LocHover({
     param($s, $e)
-    $w = $s.ClientSize.Width; $fw = $script:topFl.PreferredSize.Width
-    if (($w - $fw - 12) -ge 200) {
-      $script:topHost.SetBounds(0, 6, ($w - $fw - 12), 32); $script:topFl.Location = Pt ($w - $fw) 6
-      $rh = 44
+    $i = $e.Index
+    if ($i -eq -2) { Show-HelpText 'VHD locations: Browse' 'Pick a folder for your VHDX files (it must be on an NTFS drive that is NOT BitLocker-encrypted, with a plain-letters path). It is added to the VHD locations list, becomes the active folder, and all pages are refreshed. A folder that is already in the list is just made active.' }
+    elseif ($i -eq -3) { Show-HelpText 'VHD locations: remove from list' 'Removes this folder from the VHD locations list only. The folder and the files in it are never deleted. If it was the active one, the next folder in the list becomes active.' }
+    elseif ($i -ge 0 -and $i -lt $script:Locations.Count) {
+      Show-HelpText ("VHD location: " + $script:LocLabels[$i]) ($script:Locations[$i] + "`r`nClick to make this folder the active one: the pages then show its environments, snapshots, backups and log. Click the active folder again to re-read it after changing files outside the tool. The active folder has the orange marker; the trash icon removes it from the list (files are never deleted).")
     }
-    else {
-      $script:topHost.SetBounds(0, 6, $w, 32); $script:topFl.Location = Pt ([Math]::Max(0, $w - $fw)) 42
-      $rh = 78
-    }
-    if ($script:topRow.Height -ne $rh) { $script:topRow.Height = $rh; $script:topBar.Height = 42 + $rh + 6 }
   })
-$row.Controls.Add($vl); $row.Controls.Add($TopPanel)
-$row.Add_Resize({ param($s, $e) $script:TopPanel.SetBounds(92, 0, [Math]::Max(100, $s.ClientSize.Width - 92), $s.ClientSize.Height) })
-$top.Controls.Add($row); $top.Controls.Add($PageTitle)
 
 # ---- bottom card: description, status, log ----
 $botCard = New-Object RCard; $botCard.Dock = 'Bottom'; $botCard.Height = 204; $botCard.Padding = Pad 18 10 18 10; $botCard.Radius = 12
@@ -2405,8 +2700,8 @@ Show-Page 0
 # ---- startup / shutdown ----
 $running = $null
 try { $running = Get-RunningVhd } catch {}
-if ($VhdFolder) { $TxtFolder.Text = $VhdFolder } elseif ($running) { $TxtFolder.Text = Split-Path $running -Parent } else { $TxtFolder.Text = 'C:\VHD' }
 Restore-WindowState
+Initialize-Locations
 
 # window chrome (Windows 11 title bar colours) and verification helpers
 function Set-Dwm($attr, $val) { try { [void][Win.Dwm]::DwmSetWindowAttribute($script:Form.Handle, $attr, [ref]$val, 4) } catch {} }
@@ -2424,7 +2719,8 @@ $Form.Add_Shown({
     Invoke-Action 'Loading' {
       Write-Log "VHDX Manager started. Booted from: $(if ($running) { $running } else { 'physical disk' })"
       Update-All
-      Invoke-SystemCheck
+      if ($script:TxtFolder.Text.Trim()) { Invoke-SystemCheck }
+      else { $script:CheckOut.Text = '' }
     }
     Show-Page 0
     if ($ScreenshotDir) {

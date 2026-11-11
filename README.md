@@ -32,6 +32,7 @@ It is a single PowerShell script with a WinForms window. No installation, no dep
 - [Guide 6: Manage the boot menu](#guide-6-manage-the-boot-menu)
 - [Guide 7: Back up and restore the boot configuration](#guide-7-back-up-and-restore-the-boot-configuration)
 - [Guide 8: Use an answer file](#guide-8-use-an-answer-file)
+- [Guide 9: Work with several VHD locations](#guide-9-work-with-several-vhd-locations)
 - [Reference](#reference)
 - [Files and folders the tool creates](#files-and-folders-the-tool-creates)
 - [Safety features](#safety-features)
@@ -86,7 +87,7 @@ There is nothing to install.
 2. Double-click **`Start VHDX Manager.cmd`**. It unblocks the script and starts it with a hidden console window.
 3. Accept the **UAC prompt** (administrator rights).
 
-**Expected result:** the VHDX Manager window opens on the _Check system_ page and runs a system check automatically.
+**Expected result:** the VHDX Manager window opens on the _Check system_ page. If a VHD location is already saved, a system check runs automatically. On the very first start no location is saved yet: the VHD LOCATIONS section in the sidebar is highlighted in orange, and you continue with [Guide 1, Step A](#step-a-set-your-vhd-location).
 
 Alternatives:
 
@@ -106,8 +107,8 @@ These are optional and only meant for testing:
 | ------------------------ | ----------------------------------------------------------------------------------------------- |
 | `-NoElevate`             | Skips the "relaunch as administrator / 64-bit / PowerShell 5.1" step. Without admin rights the boot menu cannot be read and actions will fail. |
 | `-AutoCloseSeconds N`    | Closes the window after N seconds.                                                              |
-| `-ScreenshotDir <dir>`   | Saves `page1.png` to `page5.png` (one per page) into that folder and closes.                    |
-| `-VhdFolder <folder>`    | Pre-fills the **VHD folder** box with this folder. Default stays `C:\VHD` (or, inside a VHDX-booted Windows, the folder of the running VHDX). |
+| `-ScreenshotDir <dir>`   | Saves `page1.png` to `page5.png` (one per page) into that folder and closes. The images in `docs\images` were produced this way and then renamed (`00-quick-tour` ... `07-vhd-locations`), so the output names differ. |
+| `-VhdFolder <folder>`    | Uses this folder as a temporary entry in the **VHD locations** list for this run only; `config.json` is neither read nor written, so demo and screenshot runs never touch your saved folders. |
 
 Example used to create the screenshots in this guide (no admin rights, nothing is changed):
 
@@ -119,24 +120,25 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -File manager.ps1 -NoElev
 
 ## Quick tour of the window
 
-![Annotated main window showing the sidebar, top bar, list, buttons, description panel and log](docs/images/00-quick-tour.png)
+![Annotated main window showing the sidebar, page title, VHD locations, list, buttons, description panel and log](docs/images/00-quick-tour.png)
 
-1. **Sidebar** - the five pages: _Check system_, _Create base_, _Environments_, _Boot menu_, _Backup / restore_. Click one, or press **Ctrl+1** to **Ctrl+5**. The footer says _Running as administrator_ or _Not elevated (limited)_.
+1. **Sidebar pages** - _Check system_, _Create base_, _Environments_, _Boot menu_, _Backup / restore_. Click one, or press **Ctrl+1** to **Ctrl+5**. The footer says _Running as administrator_ or _Not elevated (limited)_.
 2. **Page title** - the page you are on.
-3. **VHD folder bar** - where all files are kept (default `C:\VHD`). Buttons: **Browse...**, **Open in Explorer**, **Refresh everything**.
+3. **VHD LOCATIONS** (top of the sidebar, above the pages) - the folders where your VHDX files are kept. The active one has the orange marker and is shown in bold; click another to switch (everything refreshes), click the **Browse** icon (folder symbol) to add a folder, click the trash icon on a row to remove it from the list (files are never deleted). See [Guide 9](#guide-9-work-with-several-vhd-locations).
 4. **Main area** - the list or form of the current page (here: the list of environments).
 5. **Action buttons** - every button has a small icon and the rows stay pinned below the list. Orange = main action, white = normal, dashed outline = destructive (needs confirmation).
 6. **Description panel** - hover over any button or field and its explanation appears here (when nothing is hovered it describes the page). Selecting an environment shows a summary of it.
-7. **Log** - every action is written here with a time stamp (and also to `vhd-manager.log` in the VHD folder).
+7. **Log** - every action is written here with a time stamp (and also to `vhd-manager.log` in the active folder).
 
 Good to know:
 
-- While an action is running the sidebar and the VHD folder bar are disabled and the cursor shows as busy. Long actions show a progress line above the log.
+- While an action is running the sidebar (pages and VHD locations list) is disabled and the cursor shows as busy. Long actions show a progress line above the log.
 - The window can be resized and maximized (minimum about 800x680). At small sizes the _Create base_ page scrolls and hides its side instructions. Lists and the log grow with the window.
 - Window size, position and the "keep newest backups" number are remembered in `%APPDATA%\VhdxBootManager\window.json`.
-- Changing the VHD folder (leave the box or press Browse...) refreshes all lists.
-- Inside a VHDX-booted Windows the physical drive has a different letter (often `D:`). The tool detects this and starts with the folder of the running VHDX.
-- Use a plain ASCII folder path (no accents or quotes). `diskpart` and `bcdedit` require it. A drive root such as `C:\` is not accepted. If the folder does not exist, the tool creates it.
+- Switching to another location, or adding one with the Browse icon, refreshes all lists. Click the active location again to re-read it after changing files outside the tool (the log says _Refreshed._).
+- Locations are saved in `config.json` and nothing is assumed when none is saved: see [Step A](#step-a-set-your-vhd-location) and [Guide 9](#guide-9-work-with-several-vhd-locations).
+- Inside a VHDX-booted Windows the physical drive has a different letter (often `D:`). Pick the location again from there (Browse icon) if it is not listed.
+- Folder rules (plain ASCII path, no drive root, NTFS) are in [Step A](#step-a-set-your-vhd-location). If the folder does not exist, the tool creates it.
 
 ---
 
@@ -144,25 +146,50 @@ Good to know:
 
 You do this once per Windows version. It takes about 5-15 minutes of waiting plus the time to set Windows up.
 
-### Step A: Check your system
+### Step A: Set your VHD location
+
+The tool never guesses where your VHDX files live. The first time you start it, with no location saved, the VHD LOCATIONS section in the sidebar is highlighted in orange:
+
+![Environments page with no VHD location: the VHD LOCATIONS section in the sidebar is highlighted in orange](docs/images/06-no-location.png)
+
+- the VHD LOCATIONS section in the sidebar, highlighted in orange with the text _Not set - click Browse to pick the folder for your VHDX files_.
+
+1. Look at the VHD LOCATIONS section at the top of the sidebar.
+2. Click the **Browse** icon (folder symbol) at the right of the **VHD LOCATIONS** heading.
+3. Choose (or create with _Make New Folder_) the folder that will hold all your `.vhdx` files, snapshots and boot-configuration backups, e.g. `C:\VHD`.
+
+**Expected result:** the folder appears in the list under VHD LOCATIONS with the orange marker (it is the active location), the orange highlight disappears, all pages refresh and the log says _Added folder ..._ and _Active folder: ..._. The choice is remembered for the next start.
+
+Rules for the folder:
+
+- A full local path with plain English letters only (no accents or quotes), because `diskpart` and `bcdedit` need that. A drive root such as `C:\` is not accepted.
+- It must be on an **NTFS** drive that is **not encrypted with BitLocker / Device Encryption**; native VHDX boot fails from an encrypted drive. The _Check system_ page (next step) verifies both.
+- Allow plenty of free space (see [Requirements](#requirements)).
+
+**What can go wrong**
+
+- _"The VHD folder must be a full local folder path, for example C:\VHD (not a drive root)."_ or _"Please use a VHD folder path with plain English letters only ..."_: pick another folder.
+- _"Pick a folder first (Browse in the VHD locations section)."_: an action was started while no location is set. Do this step first.
+
+### Step B: Check your system
 
 ![Check system page with the system check results](docs/images/01-check-system.png)
 
 1. Click **Check system** in the sidebar (or press **Ctrl+1**).
 2. Click **Run system check**. (It also runs once when the program starts.)
-3. Read the result. Each line starts with `OK`, `INFO`, `WARN` or `FAIL`.
+3. Read the result. Each line starts with `OK`, `INFO`, `WARN` or `FAIL`. The first line reads `OK Running as administrator.` only when the tool is elevated; otherwise it is a `WARN` telling you to start it with `Start VHDX Manager.cmd` and accept the UAC prompt.
 
 **Expected result:** a list showing Windows edition and build, UEFI firmware, whether you are booted from a VHDX, whether the VHD folder is on an NTFS drive, free space (a warning appears below 150 GB), BitLocker / Device Encryption status of that drive, whether the Hyper-V module is present, the number of boot menu entries and VHDX files found.
 
 **What can go wrong**
 
-- `FAIL ... encrypted`: native VHDX boot does not work from an encrypted drive. Use another unencrypted NTFS drive (change the VHD folder) or turn off Device Encryption in Settings > Privacy & security.
+- `FAIL ... encrypted`: native VHDX boot does not work from an encrypted drive. Use another unencrypted NTFS drive (add a folder on it with the Browse icon under VHD LOCATIONS) or turn off Device Encryption in Settings > Privacy & security.
 - `FAIL ... must be NTFS`: pick an NTFS drive.
 - `WARN Home edition`: that is the Windows you are running now. It is fine as long as the Windows you put _inside_ the VHDX is Pro, Enterprise or Education.
 - `WARN Could not read the BitLocker status`: check manually with `manage-bde -status`.
 - The screenshot above was taken without administrator rights, so it shows "Boot menu has 0 Windows entries" and an unknown BitLocker status. On a normal (elevated) start these lines are filled in.
 
-### Step B: Create the base disk
+### Step C: Create the base disk
 
 ![Create base page with the form and the "after the base is created" instructions](docs/images/02-create-base.png)
 
@@ -171,7 +198,7 @@ You do this once per Windows version. It takes about 5-15 minutes of waiting plu
 3. **Edition**: choose the edition to install. **Pro** is preselected when present. Use Pro, Enterprise or Education.
 4. **File name**: the disk file name, letters, digits, `-` and `_` only (max 40; `.vhdx` is added). Tip: put the version in the name, e.g. `base-25H2`.
 5. **Boot menu name**: the label shown at startup, e.g. `Win - Base`.
-6. **Max size (GB)**: the largest size the dynamic disk can grow to (40-4000). The default is **50% of the free space** on the drive of the VHD folder (at least 40, at most 4000; 100 if that cannot be read). It follows the VHD folder until you change it by hand. All environments built on this base inherit it. 80-150 GB is typical. You can change it later (see [Resize](#guide-4-resize-an-environment)) for standalone disks.
+6. **Max size (GB)**: the largest size the dynamic disk can grow to (40-4000). The default is **50% of the free space** on the drive of the active VHD location (at least 40, at most 4000; 100 if that cannot be read). It follows the active location until you change it by hand. All environments built on this base inherit it. 80-150 GB is typical. You can change it later (see [Resize](#guide-4-resize-an-environment)) for standalone disks.
 7. **Options**
    - **Add it to the boot menu (needed to set it up)** - ticked by default. Your current default Windows stays the default.
    - **Don't expand the file to full size when booted (saves disk space)** - optional. See [Limitations](#limitations-and-good-to-know) for the trade-off.
@@ -187,12 +214,12 @@ What the tool does, in order: saves a boot-configuration backup, creates and par
 
 - _"'... Home' does not support booting from a VHDX..."_: you picked a Home edition. Pick Pro, Enterprise or Education.
 - _"Drive ... is encrypted ... Booting from a VHDX stored there will FAIL."_: choose another drive unless you know better.
-- _"Only N GB free ... You need at least about 25 GB."_: free up space or change the VHD folder. If free space is below the max size and you did not tick _Don't expand_, you are warned that the disk will fail to boot without the space.
+- _"Only N GB free ... You need at least about 25 GB."_: free up space or switch to a location on another drive. If free space is below the max size and you did not tick _Don't expand_, you are warned that the disk will fail to boot without the space.
 - _"This ISO has no sources\install.wim or install.esd"_: use an official Windows ISO.
 - _"... already exists. Pick another file name."_: choose a different file name.
 - If DISM fails midway you are asked _Creating the base failed. Delete the incomplete file ...?_ Click **Yes**, check `vhd-manager.log`, and retry.
 
-### Step C: Set the base up inside Windows
+### Step D: Set the base up inside Windows
 
 The side panel on the _Create base_ page repeats these steps:
 
@@ -284,7 +311,7 @@ Great for a throwaway sandbox.
 
 - _"... is the base (parent) of: ... Changing it would corrupt those environments."_: you tried to delete, reset, restore or otherwise change a base that has children. Delete the environments first.
 - _"Reset only works for environments built on a base."_: the disk is Standalone or its parent is unknown.
-- _"The parent ... is missing."_: the base file was moved or deleted; put it back in the VHD folder.
+- _"The parent ... is missing."_: the base file was moved or deleted; put it back in the active VHD location.
 - Updates: monthly cumulative updates work normally inside each environment. For a new Windows version build a new base.
 
 ---
@@ -356,7 +383,7 @@ A standalone copy merges an environment with its base into **one independent ful
 
 4. **Boot menu wait (seconds)**: type a number (0-999; 0 skips the menu) and click **Set wait**.
 
-Every change here is backed up automatically first (see Guide 7).
+Every change here is backed up automatically first (see [Guide 7](#guide-7-back-up-and-restore-the-boot-configuration)).
 
 **What can go wrong**
 
@@ -435,15 +462,58 @@ Notes:
 
 ---
 
+## Guide 9: Work with several VHD locations
+
+![Sidebar with three VHD locations, one of them active](docs/images/07-vhd-locations.png)
+
+Use several locations when your VHDX files are spread over folders or drives, for example `Work-VHD`, `Lab-VHD` and `VHD-demo`. Each location has its own environments, `snapshots\`, `bcd-backups\` and log. The sidebar shows the folder name only (if two folders share a name it shows `parent\name`; hover a row for the full path). In the screenshot: (1) Browse icon, (2) saved locations with their trash icons, (3) the active location (orange marker, bold).
+
+**Add a location**
+
+1. Click the **Browse** icon at the right of VHD LOCATIONS.
+2. Pick a folder (same rules as in [Step A](#step-a-set-your-vhd-location): ASCII path, not a drive root, NTFS, not BitLocker). A folder that is already in the list is simply made active.
+
+**Expected result:** the folder is added to the list, becomes active and all pages refresh. The log says _Added folder ..._ and _Active folder: ..._.
+
+**Switch between locations**
+
+1. Click another row in the list.
+
+**Expected result:** the orange marker moves to that row; the _Environments_ and _Backup / restore_ lists (and snapshots, and the `vhd-manager.log` that is written) now refer to that folder. Click the active row again to re-read the folder after you changed files outside the tool (log: _Refreshed._). The last active location is remembered when you close the tool.
+
+**Remove a location from the list**
+
+1. Click the **trash icon** on the row.
+
+**Expected result:** the row disappears. This removes the list entry only: the folder, the `.vhdx` files and backups are **never deleted**, and you can add the folder again later. If you removed the active location, the next existing folder in the list becomes active; if none is left, the tool is back in the "no location" state described in [Step A](#step-a-set-your-vhd-location).
+
+**Where the list is stored**
+
+- In `config.json` next to `manager.ps1` (it holds the list and the active location). If that folder is not writable (for example in `C:\Program Files`), `%APPDATA%\VhdxBootManager\config.json` is used instead and the log says so. If both exist the newer file is read.
+- Without any `config.json` (first start), nothing is assumed and you are asked to pick a folder.
+
+**What can go wrong**
+
+- A location whose folder no longer exists (drive disconnected, folder renamed or deleted) is greyed out; its tooltip adds _(folder not found)_. Clicking it shows _"The folder ... was not found (drive disconnected, or the folder was renamed or deleted?). Remove it from the list with the trash icon, or pick another folder."_ Reconnect the drive, or remove the entry.
+- At startup, if the saved active folder is missing, the log says _The saved folder ... no longer exists._ and the next existing one is used (_Using ... instead._). If none exists, _None of the saved folders exist right now. Pick another one with Browse in the VHD locations section._
+- _"Could not read ... starting without saved folders."_ in the log: `config.json` is not valid JSON. Fix or delete it (this does not touch your VHDX files) and add your folders again.
+- While an action runs, the locations list is disabled, so you cannot switch in the middle of a job.
+
+---
+
 ## Reference
 
-### Top bar (all pages)
+### VHD locations (top of the sidebar, all pages)
 
-| Control                      | What it does                                                                                                         |
-| ---------------------------- | -------------------------------------------------------------------------------------------------------------------- |
-| VHD folder                   | Where all files are kept. Default `C:\VHD`. Must be a full local path on an NTFS drive that is not encrypted.        |
-| Browse... / Open in Explorer | Change or open the folder.                                                                                           |
-| Refresh everything           | Re-read VHDX files, boot menu and backups after changes made outside the tool.                                       |
+Switching a location refreshes all lists. See [Guide 9](#guide-9-work-with-several-vhd-locations).
+
+| Control                | What it does                                                                                                                                  |
+| ---------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| Browse icon            | Pick a folder for the VHDX files (full local path on an NTFS drive that is not encrypted, plain English letters, not a drive root). It is added to the list and becomes active. |
+| Location row           | Shows the folder name (`parent\name` if two share a name; hover for the full path). Click to make it active and refresh all pages; click the active one again to re-read it. |
+| Trash icon on a row    | Removes the entry from the list only. The folder and its files are never deleted.                                                             |
+
+A location whose folder is missing is greyed out. The list is saved in `config.json` next to `manager.ps1` (fallback `%APPDATA%\VhdxBootManager\config.json`). If a saved folder no longer exists at startup, the next existing one is used (a message is written to the log). With no saved location, the VHD LOCATIONS section of the sidebar is highlighted in orange and the log tells you to click Browse.
 
 Keyboard: **Ctrl+1** to **Ctrl+5** switch pages (not while an action is running).
 
@@ -461,7 +531,7 @@ Keyboard: **Ctrl+1** to **Ctrl+5** switch pages (not while an action is running)
 | Edition                                        | Which edition to apply. Home triggers a warning.                                                                                                                                                    |
 | File name                                      | Disk file name (letters, digits, `-`, `_`; `.vhdx` added).                                                                                                                                          |
 | Boot menu name                                 | Label shown in the boot menu (default `Win - Base`).                                                                                                                                                |
-| Max size (GB)                                  | 40-4000. Default 50% of the free space on the VHD folder's drive until you change it. All environments inherit it.                                                                                  |
+| Max size (GB)                                  | 40-4000. Default 50% of the free space on the active location's drive until you change it. All environments inherit it.                                                                                  |
 | Add it to the boot menu                        | Creates the boot entry so you can set the base up. Your current default is unchanged.                                                                                                               |
 | Don't expand the file to full size when booted | Writes `VirtualDiskExpandOnMount=4` into the new Windows so the file does not grow to its full maximum while booted. Risk: if the physical drive fills up, that Windows crashes.                    |
 | Answer file / Browse... / Use ISO's autounattend.xml | See [Guide 8](#guide-8-use-an-answer-file).                                                                                                                                                   |
@@ -502,7 +572,7 @@ Buttons: **Back up now**, **Restore selected...**, **Delete selected**, **Open b
 
 ## Files and folders the tool creates
 
-Inside the VHD folder:
+Inside each VHD location (the folder you added under VHD LOCATIONS):
 
 | Path               | Purpose                                                                                                        |
 | ------------------ | -------------------------------------------------------------------------------------------------------------- |
@@ -512,6 +582,12 @@ Inside the VHD folder:
 | `vhd-manager.json` | Metadata (parent and max size) used when the VHDX header cannot be read.                                       |
 | `vhd-manager.log`  | Log of everything the tool did.                                                                                |
 
+Next to the program:
+
+| Path          | Purpose                                                                                                                                                                  |
+| ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `config.json` | Created next to `manager.ps1` when you add the first location: the list of VHD locations and the active one. If the program folder is not writable it is saved as `%APPDATA%\VhdxBootManager\config.json` instead. Not created at all for runs with `-VhdFolder`. |
+
 Elsewhere: `%APPDATA%\VhdxBootManager\window.json` stores the window size, position and the "keep newest backups" number.
 
 ## Safety features
@@ -519,7 +595,7 @@ Elsewhere: `%APPDATA%\VhdxBootManager\window.json` stores the window size, posit
 - **Boot configuration is backed up before every change** (timestamped, with the reason), and on demand. Restore any earlier state on the _Backup / restore_ page; restoring itself is backed up too.
 - Confirmation dialogs for anything destructive (delete, reset, restore, overwrite).
 - The currently running VHDX is protected from modification.
-- Bases with children cannot be deleted, reset, resized, unlocked or booted without warnings.
+- Bases with children cannot be deleted, reset, resized, unlocked or booted (the tool refuses).
 - Warnings for BitLocker-encrypted drives, Home editions and low disk space.
 - Failed base creation offers to remove the incomplete file; the VHDX is always detached and the ISO unmounted.
 - Your default Windows is never changed unless you click _Set as default_ (or _Set as default boot_).
@@ -541,9 +617,12 @@ Elsewhere: `%APPDATA%\VhdxBootManager\window.json` stores the window size, posit
 | Problem                                       | Try                                                                                                                                                                                             |
 | --------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Nothing happens when launching                | Run the `.cmd` file, or `Unblock-File .\manager.ps1`; accept the UAC prompt.                                                                                                                    |
-| "VHD folder must be a full local folder path" | Use something like `C:\VHD`, ASCII characters only (not a drive root).                                                                                                                          |
+| VHD LOCATIONS is highlighted in orange | Nothing is saved yet. Click the Browse icon under VHD LOCATIONS and pick a folder ([Step A](#step-a-set-your-vhd-location)). "Pick a folder first ..." in an action means the same. |
+| "The folder ... was not found" when clicking a location | The drive is disconnected or the folder was renamed/deleted. Reconnect it, or remove the entry with the trash icon (files are never deleted) and add the right folder.              |
+| Locations list is empty after a restart       | `config.json` was missing, unreadable (the log says so) or not writable. Check `config.json` next to `manager.ps1` and in `%APPDATA%\VhdxBootManager\`, then add the folders again.               |
+| "The VHD folder must be a full local folder path" | Use something like `C:\VHD`, ASCII characters only (not a drive root).                                                                                                                      |
 | Boot menu page is empty                       | The tool is not running as administrator. Start it with the `.cmd` file and accept UAC.                                                                                                         |
-| Boot fails with an encryption-related error   | The VHD folder's drive is encrypted. Use another NTFS drive or turn off Device Encryption.                                                                                                      |
+| Boot fails with an encryption-related error   | The active location's drive is encrypted. Add a folder on another NTFS drive or turn off Device Encryption.                                                                                                      |
 | Boot menu is wrong or missing entries         | _Backup / restore_ page: pick the backup from before the problem (newest first) and click _Restore selected..._.                                                                                |
 | Answer file did nothing                       | Confirm the dialog listed it. Settings in the `windowsPE` pass are ignored; move them to `specialize` / `oobeSystem`. Check `C:\Windows\Panther\` inside the booted environment for setup logs. |
 | Base creation failed midway                   | Accept deleting the incomplete file, check `vhd-manager.log`, retry.                                                                                                                            |
