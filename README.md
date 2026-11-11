@@ -439,7 +439,7 @@ The boot menu configuration (BCD) is what decides what starts. The tool saves it
 | Restore selected...           | Replaces the whole boot configuration with the selected backup (exactly one backup must be selected). |
 | Delete selected               | Deletes the selected backup file(s) after confirmation. You can select several.                        |
 | Open backups folder           | Opens `bcd-backups\` in Explorer.                                                                      |
-| Refresh                       | Re-reads the list.                                                                                     |
+| Refresh                       | Re-reads the list (it is also re-read every time you open this page).                                                                                   |
 | Keep newest automatic backups | Older automatic backups are deleted beyond this number (10-1000, default 100; each is only tens of KB). Remembered between runs. |
 
 ---

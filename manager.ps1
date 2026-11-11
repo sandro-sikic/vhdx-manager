@@ -2699,6 +2699,10 @@ function Show-Page([int]$i) {
   $script:PageTitle.Text = $script:Nav.Items[$i]
   $script:pageList[$i].BringToFront()
   if ($i -eq 2) { & $script:envLayout $script:rp $null }
+  # Backup / restore: re-read the saved boot-configuration backups every time the page is opened
+  if ($i -eq 4 -and $script:TxtFolder.Text.Trim()) {
+    try { Update-BackupList } catch { Write-Log "Could not refresh the backup list: $($_.Exception.Message)" }
+  }
   foreach ($l in $script:lists) { if ($l.Visible) { $l.Refresh() } }
 }
 # the sidebar follows the busy state (Set-Busy disables $script:Tabs)
