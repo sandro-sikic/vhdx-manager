@@ -26,7 +26,7 @@
 #>
 # Test-only switches: -NoElevate skips the elevate/relaunch block; -AutoCloseSeconds N closes the window after N s;
 # -ScreenshotDir <dir> saves page1..page5.png of the window and closes.
-param([switch]$NoElevate, [int]$AutoCloseSeconds = 0, [string]$ScreenshotDir = '')
+param([switch]$NoElevate, [int]$AutoCloseSeconds = 0, [string]$ScreenshotDir = '', [string]$VhdFolder = '')
 
 # --------------------------------------------------------------------------
 #  Relaunch elevated, 64-bit, in Windows PowerShell 5.1 (WinForms + DISM)
@@ -2239,7 +2239,7 @@ Show-Page 0
 # ---- startup / shutdown ----
 $running = $null
 try { $running = Get-RunningVhd } catch {}
-if ($running) { $TxtFolder.Text = Split-Path $running -Parent } else { $TxtFolder.Text = 'C:\VHD' }
+if ($VhdFolder) { $TxtFolder.Text = $VhdFolder } elseif ($running) { $TxtFolder.Text = Split-Path $running -Parent } else { $TxtFolder.Text = 'C:\VHD' }
 Restore-WindowState
 
 # window chrome (Windows 11 title bar colours) and verification helpers
