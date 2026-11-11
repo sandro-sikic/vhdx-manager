@@ -1,0 +1,43 @@
+name: Release
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Compute version from commit count
+        run: echo "TAG=v$(git rev-list --count HEAD)" >> "$GITHUB_ENV"
+
+      - name: Package whole repository
+        run: |
+          name="vhdx-manager-${TAG}"
+          git archive --format=zip --prefix="${name}/" -o "${name}.zip" HEAD
+          git archive --format=tar.gz --prefix="${name}/" -o "${name}.tar.gz" HEAD
+
+      - name: Create release
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists, nothing to do."
+            exit 0
+          fi
+          gh release create "$TAG" \
+            --target "$(git rev-parse HEAD)" \
+            --generate-notes \
+            --title "$TAG" \
+            "vhdx-manager-${TAG}.zip" \
+            "vhdx-manager-${TAG}.tar.gz"
