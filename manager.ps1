@@ -567,52 +567,51 @@ function Get-EncryptionStatus([string]$DriveLetter) {
 }
 
 function Invoke-SystemCheck {
-  $sb = New-Object System.Text.StringBuilder
-  $add = { param($s, $m) [void]$sb.AppendLine(('[{0,-4}] {1}' -f $s, $m)) }
+  # one list row per check: status (OK / WARN / FAIL / INFO), short title, detail text
+  $rows = New-Object 'System.Collections.Generic.List[CheckItem]'
+  $add = { param($s, $t, $m) $rows.Add([CheckItem]::new($s, $t, $m)) }
 
-  if ($isAdmin) { & $add 'OK' 'Running as administrator.' }
-  else { & $add 'WARN' 'Not running as administrator. Most actions will fail; start the tool with Start VHDX Manager.cmd and accept the UAC prompt.' }
+  if ($isAdmin) { & $add 'OK' 'Administrator rights' 'Running as administrator.' }
+  else { & $add 'WARN' 'Administrator rights' 'Not running as administrator. Most actions will fail; start the tool with Start VHDX Manager.cmd and accept the UAC prompt.' }
   $os = Get-CimInstance Win32_OperatingSystem
-  & $add 'OK' ("This Windows: {0} (build {1})" -f $os.Caption, $os.BuildNumber)
+  $osMsg = "This Windows: {0} (build {1})" -f $os.Caption, $os.BuildNumber
   if ($os.Caption -match 'Home') {
-    & $add 'WARN' 'Home edition. The Windows you put INSIDE the VHDX must be Pro, Enterprise or Education (pick that edition on the Create base page).'
+    & $add 'WARN' 'Windows edition' ($osMsg + ' Home edition. The Windows you put INSIDE the VHDX must be Pro, Enterprise or Education (pick that edition on the Create base page).')
   }
+  else { & $add 'OK' 'Windows edition' $osMsg }
 
-  if ($env:firmware_type -eq 'UEFI') { & $add 'OK' 'Firmware: UEFI.' }
-  else { & $add 'WARN' "Firmware: $($env:firmware_type). This tool assumes UEFI." }
+  if ($env:firmware_type -eq 'UEFI') { & $add 'OK' 'Firmware' 'Firmware: UEFI.' }
+  else { & $add 'WARN' 'Firmware' "Firmware: $($env:firmware_type). This tool assumes UEFI." }
 
   $running = Get-RunningVhd
-  if ($running) { & $add 'INFO' "You are currently booted from a VHDX: $running" }
-  else { & $add 'INFO' 'You are currently booted from a normal (physical) Windows install.' }
+  if ($running) { & $add 'INFO' 'Boot source' "You are currently booted from a VHDX: $running" }
+  else { & $add 'INFO' 'Boot source' 'You are currently booted from a normal (physical) Windows install.' }
 
   $folder = Get-VhdFolder
   $drive = New-Object IO.DriveInfo($folder.Substring(0, 1))
-  if ($drive.DriveFormat -eq 'NTFS') { & $add 'OK' "VHD folder $folder is on an NTFS drive." }
-  else { & $add 'FAIL' "VHD folder drive is $($drive.DriveFormat). It must be NTFS." }
+  if ($drive.DriveFormat -eq 'NTFS') { & $add 'OK' 'VHD folder drive' "VHD folder $folder is on an NTFS drive." }
+  else { & $add 'FAIL' 'VHD folder drive' "VHD folder drive is $($drive.DriveFormat). It must be NTFS." }
   $freeGB = [math]::Round($drive.AvailableFreeSpace / 1GB, 1)
-  if ($freeGB -ge 150) { & $add 'OK' "Free space on $($drive.Name): $freeGB GB." }
-  else { & $add 'WARN' "Free space on $($drive.Name): $freeGB GB. A dynamic VHDX can grow to its full size while booted - keep plenty free." }
+  if ($freeGB -ge 150) { & $add 'OK' 'Free space' "Free space on $($drive.Name): $freeGB GB." }
+  else { & $add 'WARN' 'Free space' "Free space on $($drive.Name): $freeGB GB. A dynamic VHDX can grow to its full size while booted - keep plenty free." }
 
   $enc = Get-EncryptionStatus $folder.Substring(0, 2)
-  if ($enc -eq $true) { & $add 'FAIL' "Drive $($folder.Substring(0,2)) is BitLocker / Device Encryption encrypted. Native VHDX boot does not work from an encrypted drive: use another (unencrypted) NTFS drive or turn encryption off." }
-  elseif ($enc -eq $false) { & $add 'OK' "Drive $($folder.Substring(0,2)) is not encrypted." }
-  else { & $add 'WARN' 'Could not read the BitLocker status. Check it with: manage-bde -status' }
+  if ($enc -eq $true) { & $add 'FAIL' 'Drive encryption' "Drive $($folder.Substring(0,2)) is BitLocker / Device Encryption encrypted. Native VHDX boot does not work from an encrypted drive: use another (unencrypted) NTFS drive or turn encryption off." }
+  elseif ($enc -eq $false) { & $add 'OK' 'Drive encryption' "Drive $($folder.Substring(0,2)) is not encrypted." }
+  else { & $add 'WARN' 'Drive encryption' 'Could not read the BitLocker status. Check it with: manage-bde -status' }
 
-  if ($script:HasHyperV) { & $add 'OK' 'Hyper-V PowerShell module found (used for exact disk info and standalone copies).' }
-  else { & $add 'INFO' 'Hyper-V module not installed - not required, the tool works around it.' }
+  if ($script:HasHyperV) { & $add 'OK' 'Hyper-V module' 'Hyper-V PowerShell module found (used for exact disk info and standalone copies).' }
+  else { & $add 'INFO' 'Hyper-V module' 'Hyper-V module not installed - not required, the tool works around it.' }
 
   $entries = Get-BootEntries
   $def = Get-BootEntries '{default}'
-  & $add 'INFO' ("Boot menu has {0} Windows entr{1}. Default: {2}" -f $entries.Count, $(if ($entries.Count -eq 1) { 'y' } else { 'ies' }), $(if ($def.Count) { $def[0].Description } else { '?' }))
+  & $add 'INFO' 'Boot menu' ("Boot menu has {0} Windows entr{1}. Default: {2}" -f $entries.Count, $(if ($entries.Count -eq 1) { 'y' } else { 'ies' }), $(if ($def.Count) { $def[0].Description } else { '?' }))
 
   $vhdx = @(Get-ChildItem -LiteralPath $folder -Filter *.vhdx -File -ErrorAction SilentlyContinue)
-  & $add 'INFO' "VHDX files in ${folder}: $($vhdx.Count)"
+  & $add 'INFO' 'VHDX files in folder' "VHDX files in ${folder}: $($vhdx.Count)"
 
-  [void]$sb.AppendLine()
-  [void]$sb.AppendLine('Reminders: hibernation and BitLocker do not work inside a VHDX-booted Windows,')
-  [void]$sb.AppendLine('and Windows version upgrades (e.g. 24H2 -> 25H2) cannot be installed in place:')
-  [void]$sb.AppendLine('build a new base from the new ISO instead. Monthly updates work normally.')
-  $script:CheckOut.Text = $sb.ToString()
+  $note = 'Hibernation and BitLocker do not work inside a VHDX-booted Windows, and Windows version upgrades (e.g. 24H2 -> 25H2) cannot be installed in place: build a new base from the new ISO instead. Monthly updates work normally.'
+  $script:CheckList.SetResults($rows.ToArray(), $note)
   Write-Log 'System check complete (see the Check system page).'
 }
 
@@ -1911,6 +1910,237 @@ public class NavRail : Control {
     }
     protected override void OnEnabledChanged(EventArgs e) { Invalidate(); base.OnEnabledChanged(e); }
 }
+
+// ---- Check system page: status icons, result list (scrolls, double-buffered) and summary header ----
+public class CheckItem {
+    public string Status, Title, Detail;
+    public CheckItem(string s, string t, string d) { Status = s; Title = t; Detail = d; }
+}
+
+// vector status icons: OK = check in a circle, WARN = triangle with !, FAIL = cross in a circle, INFO = i in a circle
+public static class StatusIcons {
+    public static Color Fg(string s) {
+        switch (s) { case "OK": return Gfx.C("#2E7D32"); case "WARN": return Gfx.C("#E04500"); case "FAIL": return Gfx.C("#C62828"); }
+        return Gfx.C("#6B6B6B");
+    }
+    public static Color Tint(string s) {
+        switch (s) { case "OK": return Gfx.C("#E8F3E9"); case "WARN": return Gfx.C("#FFEEE5"); case "FAIL": return Gfx.C("#FBE9E9"); }
+        return Gfx.C("#F1F1F1");
+    }
+    public static Color Edge(string s) {
+        switch (s) { case "WARN": return Gfx.C("#F3C4AB"); case "FAIL": return Gfx.C("#EDBABA"); }
+        return Gfx.C("#DDDDDD");
+    }
+    public static void Draw(Graphics g, string status, float cx, float cy, float d) {
+        GraphicsState st = g.Save();
+        g.SmoothingMode = SmoothingMode.AntiAlias; g.PixelOffsetMode = PixelOffsetMode.HighQuality;
+        float r = d / 2f, u = d / 22f;
+        Color fg = Fg(status);
+        using (SolidBrush tb = new SolidBrush(Tint(status)))
+        using (SolidBrush fb = new SolidBrush(fg))
+        using (Pen ring = new Pen(Color.FromArgb(95, fg), Math.Max(1f, 1.2f * u)))
+        using (Pen p = new Pen(fg, Math.Max(1.2f, 1.9f * u))) {
+            p.StartCap = LineCap.Round; p.EndCap = LineCap.Round; p.LineJoin = LineJoin.Round;
+            if (status == "WARN") {
+                PointF[] t = new PointF[] { new PointF(cx, cy - r * 0.84f), new PointF(cx + r * 0.9f, cy + r * 0.72f), new PointF(cx - r * 0.9f, cy + r * 0.72f) };
+                using (Pen tp = new Pen(fg, Math.Max(1.2f, 1.7f * u))) { tp.LineJoin = LineJoin.Round; g.FillPolygon(tb, t); g.DrawPolygon(tp, t); }
+                g.DrawLine(p, cx, cy - r * 0.3f, cx, cy + r * 0.14f);
+                g.FillEllipse(fb, cx - 1.15f * u, cy + r * 0.36f - 1.15f * u, 2.3f * u, 2.3f * u);
+            } else {
+                g.FillEllipse(tb, cx - r + 0.6f, cy - r + 0.6f, d - 1.2f, d - 1.2f);
+                g.DrawEllipse(ring, cx - r + 0.6f, cy - r + 0.6f, d - 1.2f, d - 1.2f);
+                if (status == "OK")
+                    g.DrawLines(p, new PointF[] { new PointF(cx - r * 0.38f, cy + r * 0.02f), new PointF(cx - r * 0.08f, cy + r * 0.32f), new PointF(cx + r * 0.42f, cy - r * 0.3f) });
+                else if (status == "FAIL") {
+                    float k = r * 0.3f;
+                    g.DrawLine(p, cx - k, cy - k, cx + k, cy + k); g.DrawLine(p, cx + k, cy - k, cx - k, cy + k);
+                } else {
+                    g.FillEllipse(fb, cx - 1.2f * u, cy - r * 0.42f - 1.2f * u, 2.4f * u, 2.4f * u);
+                    g.DrawLine(p, cx, cy - r * 0.08f, cx, cy + r * 0.42f);
+                }
+            }
+        }
+        g.Restore(st);
+    }
+}
+
+// scrolling list of check results (one rounded row per check) plus a note card; shows a placeholder when empty
+public class CheckList : ScrollableControl {
+    List<CheckItem> items = new List<CheckItem>();
+    string note = "", kind = "none";
+    int cardW = 100, noteH = 0; int[] rowH = new int[0]; bool wide = false;
+    const int Gap = 8, TextX = 52, TitleW = 190, PadV = 14;
+    static readonly Font fT = new Font("Segoe UI Semibold", 10f), fD = new Font("Segoe UI Semilight", 9.5f), fH = new Font("Segoe UI Semibold", 8f), fE = new Font("Segoe UI Semilight", 14f);
+    const TextFormatFlags TF = TextFormatFlags.WordBreak | TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix | TextFormatFlags.Left | TextFormatFlags.Top;
+    const TextFormatFlags TF1 = TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis | TextFormatFlags.Left | TextFormatFlags.VerticalCenter;
+    public event EventHandler Changed;
+    public bool HasResults { get { return items.Count > 0; } }
+    public string Kind { get { return kind; } }
+    public CheckList() {
+        SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw | ControlStyles.Selectable, true);
+        AutoScroll = true; TabStop = false; BackColor = Color.White;
+    }
+    public int Count(string status) { int n = 0; foreach (CheckItem it in items) if (it.Status == status) n++; return n; }
+    public void SetResults(CheckItem[] arr, string noteText) {
+        items = new List<CheckItem>(arr); note = noteText ?? ""; kind = "results";
+        AutoScrollPosition = new Point(0, 0); Relayout(); if (Changed != null) Changed(this, EventArgs.Empty);
+    }
+    public void SetEmpty(string k) {
+        items = new List<CheckItem>(); note = ""; kind = k;
+        AutoScrollPosition = new Point(0, 0); Relayout(); if (Changed != null) Changed(this, EventArgs.Empty);
+    }
+    static int MeasureH(string s, Font f, int w) {
+        if (string.IsNullOrEmpty(s)) return f.Height;
+        return TextRenderer.MeasureText(s, f, new Size(Math.Max(20, w), 100000), TF).Height;
+    }
+    int Measure(int w) {
+        wide = w >= 600;
+        rowH = new int[items.Count];
+        int y = 0;
+        for (int i = 0; i < items.Count; i++) {
+            int h;
+            if (wide) h = Math.Max(46, 2 * PadV + MeasureH(items[i].Detail, fD, w - TextX - TitleW - 16));
+            else h = Math.Max(46, PadV + 18 + 2 + MeasureH(items[i].Detail, fD, w - TextX - 16) + PadV);
+            rowH[i] = h; y += h + Gap;
+        }
+        noteH = 0;
+        if (note.Length > 0) { noteH = 14 + 16 + 4 + MeasureH(note, fD, w - 32) + 14; y += 6 + noteH + 4; }
+        return y;
+    }
+    void Relayout() {
+        if (items.Count == 0) { AutoScrollMinSize = Size.Empty; Invalidate(); return; }
+        int sbw = SystemInformation.VerticalScrollBarWidth;
+        cardW = Math.Max(120, Width - 1);
+        int h = Measure(cardW);
+        if (h > Height) { cardW = Math.Max(120, Width - sbw - 8); h = Measure(cardW); AutoScrollMinSize = new Size(0, h); }
+        else AutoScrollMinSize = Size.Empty;
+        Invalidate();
+    }
+    protected override void OnResize(EventArgs e) { base.OnResize(e); Relayout(); }
+    protected override void OnScroll(ScrollEventArgs se) { base.OnScroll(se); Invalidate(); }
+    void ScrollBy(int dy) {
+        int cur = -AutoScrollPosition.Y;
+        AutoScrollPosition = new Point(0, Math.Max(0, cur + dy)); Invalidate();
+    }
+    protected override void OnMouseWheel(MouseEventArgs e) {
+        HandledMouseEventArgs he = e as HandledMouseEventArgs; if (he != null) he.Handled = true;
+        if (VScroll) ScrollBy(-e.Delta * 64 / 120);
+    }
+    protected override void OnMouseEnter(EventArgs e) { base.OnMouseEnter(e); if (!Focused) Focus(); }
+    protected override void OnMouseDown(MouseEventArgs e) { base.OnMouseDown(e); Focus(); }
+    protected override bool IsInputKey(Keys k) {
+        switch (k & Keys.KeyCode) { case Keys.Up: case Keys.Down: case Keys.PageUp: case Keys.PageDown: case Keys.Home: case Keys.End: return true; }
+        return base.IsInputKey(k);
+    }
+    protected override void OnKeyDown(KeyEventArgs e) {
+        base.OnKeyDown(e);
+        switch (e.KeyCode) {
+            case Keys.Up: ScrollBy(-48); break; case Keys.Down: ScrollBy(48); break;
+            case Keys.PageUp: ScrollBy(-Height + 40); break; case Keys.PageDown: ScrollBy(Height - 40); break;
+            case Keys.Home: ScrollBy(-1000000); break; case Keys.End: ScrollBy(1000000); break;
+        }
+    }
+    protected override void OnPaint(PaintEventArgs e) {
+        Graphics g = e.Graphics; g.SmoothingMode = SmoothingMode.AntiAlias;
+        g.Clear(Parent != null ? Parent.BackColor : Color.White);
+        if (items.Count == 0) { PaintEmpty(g); return; }
+        Color ink = Gfx.C("#111111"), grey = Gfx.C("#6B6B6B");
+        int y = AutoScrollPosition.Y; Rectangle clip = e.ClipRectangle;
+        for (int i = 0; i < items.Count; i++) {
+            int h = rowH[i];
+            if (y + h >= clip.Top && y <= clip.Bottom) {
+                CheckItem it = items[i];
+                Rectangle r = new Rectangle(0, y, cardW, h - 1);
+                using (GraphicsPath p = Gfx.Round(r, 10))
+                using (Pen pen = new Pen(StatusIcons.Edge(it.Status))) { g.FillPath(Brushes.White, p); g.DrawPath(pen, p); }
+                StatusIcons.Draw(g, it.Status, 16 + 11, y + 23, 22f);
+                bool hot = (it.Status == "WARN" || it.Status == "FAIL");
+                Color dc = hot ? ink : grey;
+                if (wide) {
+                    TextRenderer.DrawText(g, it.Title, fT, new Rectangle(TextX, y + PadV, TitleW - 10, 18), ink, TF1);
+                    TextRenderer.DrawText(g, it.Detail, fD, new Rectangle(TextX + TitleW, y + PadV + 1, cardW - TextX - TitleW - 14, h - PadV), dc, TF);
+                } else {
+                    TextRenderer.DrawText(g, it.Title, fT, new Rectangle(TextX, y + PadV, cardW - TextX - 14, 18), ink, TF1);
+                    TextRenderer.DrawText(g, it.Detail, fD, new Rectangle(TextX, y + PadV + 20, cardW - TextX - 14, h - PadV - 20), dc, TF);
+                }
+            }
+            y += h + Gap;
+        }
+        if (note.Length > 0) {
+            y += 6;
+            Rectangle r = new Rectangle(0, y, cardW, noteH - 1);
+            using (GraphicsPath p = Gfx.Round(r, 10))
+            using (SolidBrush b = new SolidBrush(Gfx.C("#F7F7F7"))) using (Pen pen = new Pen(Gfx.C("#EAEAEA"))) { g.FillPath(b, p); g.DrawPath(pen, p); }
+            TextRenderer.DrawText(g, "REMINDERS", fH, new Rectangle(16, y + 14, cardW - 32, 16), grey, TF1);
+            TextRenderer.DrawText(g, note, fD, new Rectangle(16, y + 14 + 16 + 4, cardW - 32, noteH - 14 - 20 - 8), Gfx.C("#444444"), TF);
+        }
+    }
+    void PaintEmpty(Graphics g) {
+        bool nl = (kind == "nolocation");
+        string title = nl ? "Pick a VHD location first" : "No results yet";
+        string text = nl ? "Choose or add a folder in the VHD LOCATIONS section of the sidebar. The system check then runs for that folder." : "Run the system check to see whether this PC is ready for native VHDX boot: Windows edition, UEFI, the drive for your VHD folder, BitLocker and the boot menu.";
+        int w = Math.Max(120, Width - 1), h = Math.Min(Height - 1, 250);
+        Rectangle card = new Rectangle(0, 0, w, h);
+        using (GraphicsPath p = Gfx.Round(card, 12))
+        using (Pen pen = new Pen(Gfx.C("#DDDDDD"))) { pen.DashStyle = DashStyle.Dash; g.FillPath(Brushes.White, p); g.DrawPath(pen, p); }
+        int tw = Math.Min(w - 48, 440), th = MeasureH(text, fD, tw);
+        int block = 56 + 14 + 28 + 4 + th, y0 = Math.Max(12, (h - block) / 2);
+        float cx = w / 2f;
+        using (SolidBrush tb = new SolidBrush(Gfx.C("#F3F3F3"))) g.FillEllipse(tb, cx - 28, y0, 56, 56);
+        GraphicsState st = g.Save();
+        g.TranslateTransform(cx, y0 + 28); g.ScaleTransform(1.5f, 1.5f);
+        BtnIcons.Draw(g, nl ? "folder-open" : "shield", 0, 0, Gfx.C("#6B6B6B"));
+        g.Restore(st);
+        TextRenderer.DrawText(g, title, fE, new Rectangle((int)cx - tw / 2, y0 + 70, tw, 28), Gfx.C("#111111"), TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding | TextFormatFlags.SingleLine);
+        TextRenderer.DrawText(g, text, fD, new Rectangle((int)cx - tw / 2, y0 + 102, tw, th + 2), Gfx.C("#6B6B6B"), TF | TextFormatFlags.HorizontalCenter);
+    }
+}
+
+// big status line + small counts above the list
+public class CheckSummary : Control {
+    CheckList list;
+    static readonly Font fBig = new Font("Segoe UI Semilight", 17f), fS = new Font("Segoe UI Semilight", 9.5f);
+    public CheckSummary() {
+        SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
+        BackColor = Color.White;
+    }
+    public void Bind(CheckList l) { list = l; l.Changed += delegate { Invalidate(); }; }
+    protected override void OnPaint(PaintEventArgs e) {
+        Graphics g = e.Graphics; g.SmoothingMode = SmoothingMode.AntiAlias;
+        g.Clear(Parent != null ? Parent.BackColor : Color.White);
+        Color ink = Gfx.C("#111111"), grey = Gfx.C("#6B6B6B");
+        TextFormatFlags f = TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix;
+        string head, icon; bool res = (list != null && list.HasResults);
+        int nOk = 0, nW = 0, nF = 0, nI = 0;
+        if (res) {
+            nOk = list.Count("OK"); nW = list.Count("WARN"); nF = list.Count("FAIL"); nI = list.Count("INFO");
+            if (nF > 0) { head = nF == 1 ? "1 problem to fix" : nF + " problems to fix"; icon = "FAIL"; }
+            else if (nW > 0) { head = nW == 1 ? "1 warning" : nW + " warnings"; icon = "WARN"; }
+            else { head = "Everything looks good"; icon = "OK"; }
+        } else {
+            bool nl = (list != null && list.Kind == "nolocation");
+            head = nl ? "No VHD location yet" : "Not checked yet"; icon = "INFO";
+        }
+        StatusIcons.Draw(g, icon, 15f, 17f, 30f);
+        TextRenderer.DrawText(g, head, fBig, new Rectangle(40, 0, Math.Max(10, Width - 40), 34), ink, f);
+        int y = 34;
+        if (!res) {
+            string sub = (list != null && list.Kind == "nolocation") ? "Pick a location in the sidebar to start." : "Click Run system check.";
+            TextRenderer.DrawText(g, sub, fS, new Rectangle(0, y, Width, 20), grey, f); return;
+        }
+        string[] st = new string[] { "OK", "WARN", "FAIL", "INFO" };
+        int[] n = new int[] { nOk, nW, nF, nI };
+        string[] lab = new string[] { " OK", nW == 1 ? " warning" : " warnings", nF == 1 ? " problem" : " problems", " info" };
+        int x = 0;
+        for (int i = 0; i < 4; i++) {
+            string s = n[i] + lab[i];
+            StatusIcons.Draw(g, st[i], x + 7f, y + 10f, 14f);
+            int tw = TextRenderer.MeasureText(s, fS, new Size(1000, 20), TextFormatFlags.NoPadding | TextFormatFlags.SingleLine).Width;
+            TextRenderer.DrawText(g, s, fS, new Rectangle(x + 20, y, tw + 4, 20), n[i] > 0 ? ink : grey, f);
+            x += 20 + tw + 14;
+        }
+    }
+}
 '@
 Add-Type -ReferencedAssemblies System.Windows.Forms, System.Drawing -TypeDefinition $cs -Language CSharp
 Add-Type -Namespace Win -Name Dwm -MemberDefinition '[System.Runtime.InteropServices.DllImport("dwmapi.dll")] public static extern int DwmSetWindowAttribute(System.IntPtr h, int a, ref int v, int s);'
@@ -2179,16 +2409,30 @@ $pageList = @($pCheck, $pBase, $pEnv, $pBoot, $pBackup)
 foreach ($p in $pageList) { $Tabs.Controls.Add($p) }
 
 # ======================= PAGE 1: CHECK =======================
-$CheckOutHost = New-Multi (New-Object System.Drawing.Font('Consolas', 9.5)); $CheckOutHost.Dock = 'Fill'
-$CheckOut = $CheckOutHost.Inner; $script:CheckOut = $CheckOut
-$top1 = New-Object System.Windows.Forms.Panel; $top1.Dock = 'Top'; $top1.Height = 70; $top1.BackColor = $script:cWhite
+$CheckList = New-Object CheckList; $CheckList.Dock = 'Fill'; $script:CheckList = $CheckList
+[Gfx]::Explorer($CheckList)
+Add-Help $CheckList 'System check results' 'One row per check. A green check means OK, an orange triangle is a warning, a red cross is a problem you should fix before creating a base, and a grey i is just information. Scroll with the mouse wheel if the list does not fit.'
+$chkSum = New-Object CheckSummary; $chkSum.Size = Sz 400 54; $chkSum.Bind($CheckList)
+$top1 = New-Object System.Windows.Forms.Panel; $top1.Dock = 'Top'; $top1.Height = 118; $top1.BackColor = $script:cWhite
 $bRun = New-Btn 'Run system check' 'primary' 'Checks everything needed before you start: your Windows edition, UEFI firmware, whether the VHD folder is on an NTFS drive with enough free space, whether that drive is BitLocker/Device-Encryption encrypted (native VHDX boot fails on encrypted drives), whether you are currently booted from a VHDX, and what is in the boot menu. It only reads information and does not change anything.' { Invoke-SystemCheck } 170 36
-$bRun.Location = Pt 0 0; $top1.Controls.Add($bRun)
-$chkInfo = New-Label 'Start here. If anything shows FAIL, fix it before creating a base (most often: the drive holding the VHD folder is encrypted - pick another drive or turn off Device Encryption in Settings > Privacy & security).' $script:fSmall $script:cGrey
-$chkInfo.Location = Pt 214 0; $chkInfo.Size = Sz 400 64
-$top1.Controls.Add($chkInfo); $script:chkInfo = $chkInfo
-$top1.Add_Resize({ param($s, $e) $script:chkInfo.Width = [Math]::Max(100, $s.ClientSize.Width - 214) })
-$pCheck.Controls.Add($CheckOutHost); $pCheck.Controls.Add($top1); $CheckOutHost.BringToFront()
+$bRun.Location = Pt 0 8
+$chkInfo = New-Label 'Start here. If anything shows a red cross, fix it before creating a base (most often: the drive holding the VHD folder is encrypted - pick another drive or turn off Device Encryption in Settings > Privacy & security).' $script:fSmall $script:cGrey
+$chkInfo.Location = Pt 0 62; $chkInfo.Size = Sz 400 40
+$script:bRun = $bRun; $script:chkSum = $chkSum
+$top1.Controls.Add($chkSum); $top1.Controls.Add($bRun); $top1.Controls.Add($chkInfo); $script:chkInfo = $chkInfo
+$top1.Add_Resize({
+    param($s, $e)
+    $w = $s.ClientSize.Width
+    $script:bRun.Left = [Math]::Max(0, $w - $script:bRun.Width - 14)
+    $script:chkSum.Width = [Math]::Max(100, $script:bRun.Left - 12)
+    $script:chkInfo.Width = [Math]::Max(100, $w - 14)
+    $th = [System.Windows.Forms.TextRenderer]::MeasureText($script:chkInfo.Text, $script:fSmall, (Sz $script:chkInfo.Width 0), [System.Windows.Forms.TextFormatFlags]'WordBreak,NoPadding').Height
+    $script:chkInfo.Height = $th + 2
+    $h = 62 + $th + 14
+    if ($s.Height -ne $h) { $s.Height = $h }
+  })
+$pCheck.Controls.Add($CheckList); $pCheck.Controls.Add($top1); $CheckList.BringToFront()
+$CheckList.SetEmpty('none')
 
 # ======================= PAGE 2: CREATE BASE =======================
 $tl = New-Object System.Windows.Forms.TableLayoutPanel
@@ -2583,6 +2827,11 @@ function Sync-LocationsUi {
 }
 
 # make a saved location active, save the config and refresh everything (also used to re-read the active one)
+# re-runs the system check for the active location (or clears its output when no location is active)
+function Update-SystemCheckForLocation {
+  if ($script:TxtFolder.Text.Trim()) { Invoke-SystemCheck }
+  else { $script:CheckList.SetEmpty('nolocation') }
+}
 function Select-Location([int]$Index) {
   if ($Index -lt 0 -or $Index -ge $script:Locations.Count) { return }
   $p = $script:Locations[$Index]
@@ -2592,6 +2841,7 @@ function Select-Location([int]$Index) {
   Set-ActiveFolder $p
   Save-Config
   Update-All
+  Update-SystemCheckForLocation
   if ($same) { Write-Log 'Refreshed.' } else { Write-Log "Active folder: $p" }
 }
 
@@ -2626,6 +2876,7 @@ function Remove-Location([int]$Index) {
   }
   Save-Config
   Update-All
+  if ($wasActive) { Update-SystemCheckForLocation }
 }
 
 function Initialize-Locations {
@@ -2720,7 +2971,7 @@ $Form.Add_Shown({
       Write-Log "VHDX Manager started. Booted from: $(if ($running) { $running } else { 'physical disk' })"
       Update-All
       if ($script:TxtFolder.Text.Trim()) { Invoke-SystemCheck }
-      else { $script:CheckOut.Text = '' }
+      else { $script:CheckList.SetEmpty('nolocation') }
     }
     Show-Page 0
     if ($ScreenshotDir) {

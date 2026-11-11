@@ -135,7 +135,7 @@ Good to know:
 - While an action is running the sidebar (pages and VHD locations list) is disabled and the cursor shows as busy. Long actions show a progress line above the log.
 - The window can be resized and maximized (minimum about 800x680). At small sizes the _Create base_ page scrolls and hides its side instructions. Lists and the log grow with the window.
 - Window size, position and the "keep newest backups" number are remembered in `%APPDATA%\VhdxBootManager\window.json`.
-- Switching to another location, or adding one with the Browse icon, refreshes all lists. Click the active location again to re-read it after changing files outside the tool (the log says _Refreshed._).
+- Switching to another location, or adding one with the Browse icon, refreshes all lists and re-runs the system check for that folder. Click the active location again to re-read it after changing files outside the tool (the log says _Refreshed._).
 - Locations are saved in `config.json` and nothing is assumed when none is saved: see [Step A](#step-a-set-your-vhd-location) and [Guide 9](#guide-9-work-with-several-vhd-locations).
 - Inside a VHDX-booted Windows the physical drive has a different letter (often `D:`). Pick the location again from there (Browse icon) if it is not listed.
 - Folder rules (plain ASCII path, no drive root, NTFS) are in [Step A](#step-a-set-your-vhd-location). If the folder does not exist, the tool creates it.
@@ -176,18 +176,30 @@ Rules for the folder:
 ![Check system page with the system check results](docs/images/01-check-system.png)
 
 1. Click **Check system** in the sidebar (or press **Ctrl+1**).
-2. Click **Run system check**. (It also runs once when the program starts.)
-3. Read the result. Each line starts with `OK`, `INFO`, `WARN` or `FAIL`. The first line reads `OK Running as administrator.` only when the tool is elevated; otherwise it is a `WARN` telling you to start it with `Start VHDX Manager.cmd` and accept the UAC prompt.
+2. Click **Run system check**. (It also runs once when the program starts, and again whenever you switch the VHD location.) Before the first check, or while no VHD location is set, the page shows a friendly placeholder instead of results: _No results yet_ / _Pick a VHD location first_.
+3. Read the **summary** at the top: a big status line (_Everything looks good_, _2 warnings_ or _1 problem to fix_) with small counts of OK, warnings, problems and info rows.
+4. Read the **list**, one rounded row per check with a status icon, a bold title and a one-line detail (long details wrap). The icon shapes differ, so you do not have to rely on colour:
 
-**Expected result:** a list showing Windows edition and build, UEFI firmware, whether you are booted from a VHDX, whether the VHD folder is on an NTFS drive, free space (a warning appears below 150 GB), BitLocker / Device Encryption status of that drive, whether the Hyper-V module is present, the number of boot menu entries and VHDX files found.
+   | Icon                       | Meaning                                                                    |
+   | -------------------------- | -------------------------------------------------------------------------- |
+   | Green check in a circle    | **OK** - this requirement is fine.                                         |
+   | Orange triangle with `!`   | **Warning** - not blocking, but read the detail (the row is outlined in orange). |
+   | Red cross in a circle      | **Problem** - fix it before creating a base (the row is outlined in red).  |
+   | Grey `i` in a circle       | **Info** - just good to know, nothing to fix.                              |
+
+5. Below the list a **Reminders** note says that hibernation and BitLocker do not work inside a VHDX-booted Windows, and that Windows version upgrades (for example 24H2 to 25H2) cannot be installed in place: build a new base from the new ISO instead; monthly updates work normally.
+
+The list scrolls (mouse wheel, scrollbar, or arrow / Page Up / Page Down keys) when it does not fit the window.
+
+**Expected result:** ten rows, in this order: _Administrator rights_ (a warning with a hint to start the tool with `Start VHDX Manager.cmd` and accept the UAC prompt when it is not elevated), _Windows edition_ (this Windows and its build; a warning for Home edition), _Firmware_ (UEFI), _Boot source_ (info: running from a VHDX or a physical install), _VHD folder drive_ (must be NTFS), _Free space_ (a warning appears below 150 GB), _Drive encryption_ (BitLocker / Device Encryption status of that drive), _Hyper-V module_ (info), _Boot menu_ (info: number of entries and the default) and _VHDX files in folder_ (info: how many).
 
 **What can go wrong**
 
-- `FAIL ... encrypted`: native VHDX boot does not work from an encrypted drive. Use another unencrypted NTFS drive (add a folder on it with the Browse icon under VHD LOCATIONS) or turn off Device Encryption in Settings > Privacy & security.
-- `FAIL ... must be NTFS`: pick an NTFS drive.
-- `WARN Home edition`: that is the Windows you are running now. It is fine as long as the Windows you put _inside_ the VHDX is Pro, Enterprise or Education.
-- `WARN Could not read the BitLocker status`: check manually with `manage-bde -status`.
-- The screenshot above was taken without administrator rights, so it shows "Boot menu has 0 Windows entries" and an unknown BitLocker status. On a normal (elevated) start these lines are filled in.
+- _Drive encryption_ shows a red cross ("... is BitLocker / Device Encryption encrypted"): native VHDX boot does not work from an encrypted drive. Use another unencrypted NTFS drive (add a folder on it with the Browse icon under VHD LOCATIONS) or turn off Device Encryption in Settings > Privacy & security.
+- _VHD folder drive_ shows a red cross ("... must be NTFS"): pick an NTFS drive.
+- _Windows edition_ warns about Home edition: that is the Windows you are running now. It is fine as long as the Windows you put _inside_ the VHDX is Pro, Enterprise or Education.
+- _Drive encryption_ warns "Could not read the BitLocker status": check manually with `manage-bde -status`.
+- The screenshot above was taken without administrator rights, so it starts with an _Administrator rights_ warning and (further down) shows "Boot menu has 0 Windows entries" and an unknown BitLocker status. On a normal (elevated) start these rows are filled in. The free-space warning there comes from that PC having less than 150 GB free.
 
 ### Step C: Create the base disk
 
@@ -479,7 +491,7 @@ Use several locations when your VHDX files are spread over folders or drives, fo
 
 1. Click another row in the list.
 
-**Expected result:** the orange marker moves to that row; the _Environments_ and _Backup / restore_ lists (and snapshots, and the `vhd-manager.log` that is written) now refer to that folder. Click the active row again to re-read the folder after you changed files outside the tool (log: _Refreshed._). The last active location is remembered when you close the tool.
+**Expected result:** the orange marker moves to that row; the _Environments_ and _Backup / restore_ lists (and snapshots, and the `vhd-manager.log` that is written) now refer to that folder, and the _Check system_ page shows a fresh system check for it. Click the active row again to re-read the folder after you changed files outside the tool (log: _Refreshed._). The last active location is remembered when you close the tool.
 
 **Remove a location from the list**
 
@@ -521,7 +533,11 @@ Keyboard: **Ctrl+1** to **Ctrl+5** switch pages (not while an action is running)
 
 | Control          | What it does                                                                         |
 | ---------------- | ------------------------------------------------------------------------------------ |
-| Run system check | Read-only. Checks edition, UEFI, NTFS, free space, BitLocker, running VHDX, Hyper-V module, boot menu, VHDX count. |
+| Run system check | Read-only. Re-runs all checks and rebuilds the list below. Runs automatically at startup and after switching the VHD location. |
+| Summary line     | _Everything looks good_ (only OK / info rows), _N warnings_ or _N problems to fix_, plus counts of OK, warnings, problems and info rows. |
+| Result list      | One row per check, in this order: Administrator rights, Windows edition, Firmware, Boot source, VHD folder drive, Free space, Drive encryption, Hyper-V module, Boot menu, VHDX files in folder. Each row has a status icon (green check = OK, orange triangle = warning, red cross = problem, grey i = info), a title and a detail line. Scrolls when it does not fit. |
+| Reminders note   | Hibernation and BitLocker do not work inside a VHDX-booted Windows; Windows version upgrades cannot be installed in place (build a new base from the new ISO). |
+| Empty state      | Before the first check: _No results yet_. With no VHD location set: _Pick a VHD location first_. |
 
 ### Page 2 - Create base
 
