@@ -553,6 +553,49 @@ function Dismount-Vhdx([string]$Path) {
 }
 
 # ==========================================================================
+# Desktop shortcut that restarts into one environment (asks for confirmation, then
+# bcdedit /bootsequence + restart). It runs a small .cmd kept in <VHD folder>\shortcuts and
+# is flagged "Run as administrator" because bcdedit needs elevation.
+function New-RestartShortcut([string]$Id, [string]$Label, [string]$EnvName) {
+  $dir = Join-Path (Get-VhdFolder) 'shortcuts'
+  New-Item -ItemType Directory -Path $dir -Force | Out-Null
+  $safe = ($EnvName -replace '[\\/:*?"<>|%^&!]', '_').Trim()
+  if (-not $safe) { $safe = 'environment' }
+  $shown = ($Label -replace '[%^&!"<>|]', '_')
+  $cmdPath = Join-Path $dir "Restart into $safe.cmd"
+  $lines = @(
+    '@echo off',
+    "title Restart into $shown",
+    "echo This will restart the PC into: $shown",
+    'echo (one time only; the normal default boot is not changed)',
+    'echo.',
+    'choice /c YN /m "Save your work first. Restart now"',
+    'if errorlevel 2 exit /b 1',
+    "`"$BcdEdit`" /bootsequence $Id",
+    'if errorlevel 1 (echo Could not set the boot sequence. The boot menu entry may have been removed. & pause & exit /b 1)',
+    "`"$(Join-Path $Sys32 'shutdown.exe')`" /r /t 5"
+  )
+  Set-Content -LiteralPath $cmdPath -Value $lines -Encoding ASCII
+
+  $lnkPath = Join-Path ([Environment]::GetFolderPath('Desktop')) "Restart into $safe.lnk"
+  $sh = New-Object -ComObject WScript.Shell
+  $lnk = $sh.CreateShortcut($lnkPath)
+  $lnk.TargetPath = $CmdExe
+  $lnk.Arguments = "/c `"`"$cmdPath`"`""
+  $lnk.WorkingDirectory = $Sys32
+  $lnk.IconLocation = (Join-Path $Sys32 'shell32.dll') + ',27'
+  $lnk.Description = "Restart into $shown (one time)"
+  $lnk.Save()
+  [void][Runtime.InteropServices.Marshal]::ReleaseComObject($sh)
+
+  # set the "Run as administrator" flag (bit 0x20 of the byte at offset 0x15)
+  $bytes = [IO.File]::ReadAllBytes($lnkPath)
+  $bytes[0x15] = $bytes[0x15] -bor 0x20
+  [IO.File]::WriteAllBytes($lnkPath, $bytes)
+  Write-Log "Desktop shortcut created: $lnkPath"
+  return $lnkPath
+}
+
 #  System checks
 # ==========================================================================
 function Get-EncryptionStatus([string]$DriveLetter) {
@@ -2173,7 +2216,7 @@ $script:BtnIconMap = @{
   'Browse...' = 'folder-open'; 'Refresh' = 'refresh'
   'Run system check' = 'shield'; 'Read editions' = 'list'; 'Create base VHDX' = 'disk'; 'Copy sysprep command' = 'clipboard'
   'New environment from selected' = 'plus'; 'Make standalone copy' = 'copy'; 'Snapshot' = 'camera'; 'Restore snapshot...' = 'restore'
-  'Open snapshots folder' = 'folder-open'; 'Restart into this' = 'power'; 'Set as default boot' = 'star'; 'Set as default' = 'star'
+  'Open snapshots folder' = 'folder-open'; 'Restart into this' = 'power'; 'Create desktop shortcut' = 'plus'; 'Set as default boot' = 'star'; 'Set as default' = 'star'
   'Add boot menu entry' = 'plus'; 'Rename boot menu entry' = 'pencil'; 'Rename' = 'pencil'; 'Remove boot menu entries' = 'minus'
   'Disable expand-on-boot' = 'x'; 'Change max size...' = 'resize'; 'Lock / unlock' = 'lock'; 'Reset to fresh' = 'refresh'
   'Delete environment' = 'trash'; 'Delete entry' = 'trash'; 'Delete selected' = 'trash'; 'Set wait' = 'clock'
@@ -2697,6 +2740,10 @@ function Show-Page([int]$i) {
   for ($k = 0; $k -lt $script:pageList.Count; $k++) { $script:pageList[$k].Visible = ($k -eq $i) }
   $script:Nav.Pick($i)
   $script:PageTitle.Text = $script:Nav.Items[$i]
+$rp.Controls.Add((New-Btn 'Create desktop shortcut' 'ghost' 'Puts a shortcut on your desktop that restarts the PC into the selected environment, for that one restart only (it asks for confirmation and administrator rights first). If the environment is not in the boot menu yet, you are offered to add it.' {
+    $e = Get-SelectedEnv; Assert-NoChildren $e; $b = Get-EnvBootEntry $e -OfferToAdd; Update-All
+    $p = New-RestartShortcut $b.Id $b.Description $e.Name
+    Show-Info "Shortcut created on your desktop:`r`n$p`r`n`r`nIf you later remove and re-add this environment's boot menu entry, create the shortcut again." }))
   $script:pageList[$i].BringToFront()
   if ($i -eq 2) { & $script:envLayout $script:rp $null }
   # Backup / restore: re-read the saved boot-configuration backups every time the page is opened

@@ -393,6 +393,7 @@ A standalone copy merges an environment with its base into **one independent ful
 | Delete entry   | Removes the entry from the menu after confirmation (_Remove '<name>' from the boot menu? (No files are deleted.)_). The entry of the Windows you are running cannot be deleted. |
 | Refresh        | Re-reads the boot menu.                                                                                                              |
 
+| Create desktop shortcut | Puts a desktop shortcut that restarts into it once (asks to confirm, runs as administrator). Re-create it if you re-add the boot entry. |
 4. **Boot menu wait (seconds)**: type a number (0-999; 0 skips the menu) and click **Set wait**.
 
 Every change here is backed up automatically first (see [Guide 7](#guide-7-back-up-and-restore-the-boot-configuration)).
@@ -567,6 +568,7 @@ Keyboard: **Ctrl+1** to **Ctrl+5** switch pages (not while an action is running)
 | Boot menu  | Set as default boot             | Makes it the automatic boot choice.                                                                            |
 | Boot menu  | Add boot menu entry             | Adds an entry (asks for the name). Not allowed for a base that others are built on.                            |
 | Boot menu  | Rename boot menu entry          | Changes the name shown in the boot menu.                                                                       |
+| Boot menu  | Create desktop shortcut         | Desktop shortcut that does the same as _Restart into this_ with one double-click.                              |
 | Boot menu  | Remove boot menu entries        | Removes the entries; the file is kept.                                                                         |
 | Boot menu  | Disable expand-on-boot          | Applies the no-expand registry setting to an existing environment.                                             |
 | Manage     | Change max size...              | Grows (or, with the Hyper-V module, shrinks) the maximum size of a standalone disk. See [Guide 4](#guide-4-resize-an-environment). |
