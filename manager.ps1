@@ -2524,6 +2524,11 @@ Put (Lbl 'Max size (GB)') 0 4; Put $hSize 1 4
 
 $ChkAddBoot = New-Check 'Add it to the boot menu (needed to set it up)' $true 'Add to boot menu' 'Creates a boot menu entry for the base so you can start it once and finish Windows setup. Your current Windows stays the default.'
 $script:ChkAddBoot = $ChkAddBoot
+# Window / taskbar icon (assets\icon.ico next to this script; the default icon is kept if it is missing)
+try {
+  $iconFile = Join-Path $PSScriptRoot 'assets\icon.ico'
+  if (Test-Path -LiteralPath $iconFile) { $Form.Icon = New-Object System.Drawing.Icon($iconFile) }
+} catch { }
 $ChkNoExpand = New-Check "Don't expand the file to full size when booted (saves disk space)" $false "Don't expand at boot" 'Normally Windows grows a dynamic VHDX to its FULL maximum size while it is booted (a 100 GB disk takes 100 GB on the drive). Ticking this writes VirtualDiskExpandOnMount=4 into the new Windows, so files stay small. Every environment built on this base inherits it. Risk: if the physical drive fills up completely, the running environment crashes.'
 $script:ChkNoExpand = $ChkNoExpand
 Put (Lbl 'Options') 0 5; Put $ChkAddBoot 1 5 3; Put $ChkNoExpand 1 6 3
