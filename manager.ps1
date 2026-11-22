@@ -87,6 +87,31 @@ function Set-Status([string]$Text) {
   [System.Windows.Forms.Application]::DoEvents()
 }
 
+# ---- progress bar in the status row (bottom card) ----
+$script:ProgLast = -1
+function Show-Progress([string]$Text = '') {
+  $script:ProgLast = -1
+  if ($script:ProgBar) { $script:ProgBar.Indeterminate = $true; $script:ProgBar.Value = 0; $script:ProgBar.Visible = $true }
+  if ($Text) { Set-Status $Text } else { [System.Windows.Forms.Application]::DoEvents() }
+}
+# Determinate value; never goes backwards until the next Show-Progress / Hide-Progress.
+function Set-Progress([int]$Percent, [string]$Text = '') {
+  if ($Percent -gt 100) { $Percent = 100 }
+  if ($Percent -lt 0) { $Percent = 0 }
+  if ($script:ProgBar) {
+    if ($Percent -gt $script:ProgLast) {
+      $script:ProgLast = $Percent
+      $script:ProgBar.Indeterminate = $false; $script:ProgBar.Value = $Percent
+    }
+    if (-not $script:ProgBar.Visible) { $script:ProgBar.Visible = $true }
+  }
+  if ($Text) { Set-Status $Text } else { [System.Windows.Forms.Application]::DoEvents() }
+}
+function Hide-Progress {
+  $script:ProgLast = -1
+  if ($script:ProgBar) { $script:ProgBar.Visible = $false; $script:ProgBar.Indeterminate = $false; $script:ProgBar.Value = 0 }
+}
+
 function Confirm-Action([string]$Text, [string]$Title = 'Please confirm') {
   $r = [System.Windows.Forms.MessageBox]::Show($script:Form, $Text, $Title, [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Question)
   return ($r -eq [System.Windows.Forms.DialogResult]::Yes)
@@ -104,7 +129,7 @@ function Set-Busy([bool]$Busy) {
   $script:Tabs.Enabled = -not $Busy
   $script:Nav.Enabled = -not $Busy     # sidebar: page items and the VHD locations list
   if ($Busy) { $script:Form.Cursor = [System.Windows.Forms.Cursors]::WaitCursor }
-  else { $script:Form.Cursor = [System.Windows.Forms.Cursors]::Default }
+  else { $script:Form.Cursor = [System.Windows.Forms.Cursors]::Default; Hide-Progress }
   [System.Windows.Forms.Application]::DoEvents()
 }
 
@@ -123,6 +148,7 @@ function Invoke-Action([string]$Name, [scriptblock]$Action) {
     [void][System.Windows.Forms.MessageBox]::Show($script:Form, $msg, $Name, [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error)
   }
   finally {
+    Hide-Progress
     Set-Busy $false
     Set-Status ''
   }
@@ -166,15 +192,23 @@ function Read-NewOutput([string]$Path, $State, [bool]$Silent) {
   for ($i = 0; $i -lt $parts.Count - 1; $i++) {
     $seg = ($parts[$i] -split "`r") | Where-Object { $_.Trim() } | Select-Object -Last 1
     if (-not $seg) { continue }
-    if ($seg -match '^\s*\[.*%') { Set-Status $seg.Trim() }       # DISM progress bar
+    if ($seg -match '^\s*\[.*%') { Set-Status $seg.Trim(); Update-ProgressFromLine $seg }       # DISM progress bar
+    elseif ($seg -match '^\s*(\d{1,3})\s+percent') { Update-ProgressFromLine $seg }            # diskpart: "NN percent completed" (not logged)
     elseif (-not $Silent) { Write-Log ('    ' + $seg.Trim()) }
   }
   $last = ($State.Partial -split "`r") | Where-Object { $_.Trim() } | Select-Object -Last 1
-  if ($last -and $last -match '^\s*\[.*%') { Set-Status $last.Trim() }
+  if ($last -and $last -match '^\s*\[.*%') { Set-Status $last.Trim(); Update-ProgressFromLine $last }
+  elseif ($last -and $last -match '^\s*(\d{1,3})\s+percent') { Update-ProgressFromLine $last }
+}
+
+# Feeds the progress bar from a tool output line: "[====  50.0%  ]" (DISM) or "50 percent completed" (diskpart).
+function Update-ProgressFromLine([string]$Line) {
+  if ($Line -match '(\d{1,3}(?:\.\d+)?)\s*(%|percent)') { Set-Progress ([int][math]::Floor([double]$Matches[1])) }
 }
 
 function Invoke-External {
-  param([Parameter(Mandatory = $true)][string]$CommandLine, [switch]$Silent, [switch]$NoThrow)
+  param([Parameter(Mandatory = $true)][string]$CommandLine, [switch]$Silent, [switch]$NoThrow,
+    [string]$ProgressFile = '', [long]$ProgressTotalBytes = 0)
   $out = [IO.Path]::GetTempFileName()
   $psi = New-Object System.Diagnostics.ProcessStartInfo
   $psi.FileName = $CmdExe
@@ -183,27 +217,44 @@ function Invoke-External {
   $psi.CreateNoWindow = $true
   $proc = [System.Diagnostics.Process]::Start($psi)
   $state = @{ Pos = [long]0; Partial = ''; All = (New-Object System.Text.StringBuilder) }
-  while (-not $proc.HasExited) {
-    Start-Sleep -Milliseconds 150
+  $watch = [Diagnostics.Stopwatch]::StartNew(); $nextPoll = 0
+  try {
+    while (-not $proc.HasExited) {
+      Start-Sleep -Milliseconds 150
+      Read-NewOutput $out $state ([bool]$Silent)
+      if ($ProgressFile -and $ProgressTotalBytes -gt 0 -and $watch.ElapsedMilliseconds -ge $nextPoll) {
+        $nextPoll = $watch.ElapsedMilliseconds + 400
+        $len = -1
+        try {
+          $pf = [IO.File]::Open($ProgressFile, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete)
+          try { $len = $pf.Length } finally { $pf.Dispose() }
+        }
+        catch { $len = -1 }      # not created yet / locked
+        if ($len -ge 0) { Set-Progress ([int][math]::Min(99, [math]::Floor($len * 100.0 / $ProgressTotalBytes))) }
+      }
+      [System.Windows.Forms.Application]::DoEvents()
+    }
+    $proc.WaitForExit()
     Read-NewOutput $out $state ([bool]$Silent)
-    [System.Windows.Forms.Application]::DoEvents()
+    if ($state.Partial.Trim() -and -not $Silent -and $state.Partial -notmatch '^\s*\[.*%' -and $state.Partial -notmatch '^\s*\d{1,3}\s+percent') { Write-Log ('    ' + $state.Partial.Trim()) }
+    $code = $proc.ExitCode
+    if ($code -eq 0 -and $script:ProgBar -and $script:ProgBar.Visible) { Set-Progress 100 }
   }
-  $proc.WaitForExit()
-  Read-NewOutput $out $state ([bool]$Silent)
-  if ($state.Partial.Trim() -and -not $Silent -and $state.Partial -notmatch '^\s*\[.*%') { Write-Log ('    ' + $state.Partial.Trim()) }
-  $code = $proc.ExitCode
-  Remove-Item -LiteralPath $out -Force -ErrorAction SilentlyContinue
+  finally {
+    Hide-Progress
+    Remove-Item -LiteralPath $out -Force -ErrorAction SilentlyContinue
+  }
   Set-Status ''
   if ($code -ne 0 -and -not $NoThrow) { throw "Command failed (exit code $code). See the log for details.`r`n$CommandLine" }
   return [pscustomobject]@{ ExitCode = $code; Output = $state.All.ToString() }
 }
 
-function Invoke-Diskpart([string[]]$Lines) {
+function Invoke-Diskpart([string[]]$Lines, [string]$ProgressFile = '', [long]$ProgressTotalBytes = 0) {
   $f = [IO.Path]::GetTempFileName()
   Set-Content -LiteralPath $f -Value $Lines -Encoding ASCII
   Write-Log ('diskpart: ' + ($Lines -join '  |  '))
   try {
-    $r = Invoke-External -CommandLine ('"' + $DiskPart + '" /s "' + $f + '"') -Silent -NoThrow
+    $r = Invoke-External -CommandLine ('"' + $DiskPart + '" /s "' + $f + '"') -Silent -NoThrow -ProgressFile $ProgressFile -ProgressTotalBytes $ProgressTotalBytes
     $useful = ($r.Output -split "`r?`n") | Where-Object { $_.Trim() -and $_ -notmatch 'Microsoft DiskPart|Copyright|On computer|^\s*DISKPART>' }
     foreach ($u in $useful) { Write-Log ('    ' + $u.Trim()) }
     if ($r.ExitCode -ne 0) { throw "diskpart failed (exit code $($r.ExitCode)). See the log for details." }
@@ -502,6 +553,49 @@ function Start-RestartInto([string]$Id, [string]$Label) {
   }
 }
 
+# Desktop shortcut that restarts into one environment (asks for confirmation, then
+# bcdedit /bootsequence + restart). It runs a small .cmd kept in <VHD folder>\shortcuts and
+# is flagged "Run as administrator" because bcdedit needs elevation.
+function New-RestartShortcut([string]$Id, [string]$Label, [string]$EnvName) {
+  $dir = Join-Path (Get-VhdFolder) 'shortcuts'
+  New-Item -ItemType Directory -Path $dir -Force | Out-Null
+  $safe = ($EnvName -replace '[\\/:*?"<>|%^&!]', '_').Trim()
+  if (-not $safe) { $safe = 'environment' }
+  $shown = ($Label -replace '[%^&!"<>|]', '_')
+  $cmdPath = Join-Path $dir "Restart into $safe.cmd"
+  $lines = @(
+    '@echo off',
+    "title Restart into $shown",
+    "echo This will restart the PC into: $shown",
+    'echo (one time only; the normal default boot is not changed)',
+    'echo.',
+    'choice /c YN /m "Save your work first. Restart now"',
+    'if errorlevel 2 exit /b 1',
+    "`"$BcdEdit`" /bootsequence $Id",
+    'if errorlevel 1 (echo Could not set the boot sequence. The boot menu entry may have been removed. & pause & exit /b 1)',
+    "`"$(Join-Path $Sys32 'shutdown.exe')`" /r /t 5"
+  )
+  Set-Content -LiteralPath $cmdPath -Value $lines -Encoding ASCII
+
+  $lnkPath = Join-Path ([Environment]::GetFolderPath('Desktop')) "Restart into $safe.lnk"
+  $sh = New-Object -ComObject WScript.Shell
+  $lnk = $sh.CreateShortcut($lnkPath)
+  $lnk.TargetPath = $CmdExe
+  $lnk.Arguments = "/c `"`"$cmdPath`"`""
+  $lnk.WorkingDirectory = $Sys32
+  $lnk.IconLocation = (Join-Path $Sys32 'shell32.dll') + ',27'
+  $lnk.Description = "Restart into $shown (one time)"
+  $lnk.Save()
+  [void][Runtime.InteropServices.Marshal]::ReleaseComObject($sh)
+
+  # set the "Run as administrator" flag (bit 0x20 of the byte at offset 0x15)
+  $bytes = [IO.File]::ReadAllBytes($lnkPath)
+  $bytes[0x15] = $bytes[0x15] -bor 0x20
+  [IO.File]::WriteAllBytes($lnkPath, $bytes)
+  Write-Log "Desktop shortcut created: $lnkPath"
+  return $lnkPath
+}
+
 # ==========================================================================
 #  Registry tweak: stop dynamic VHDX expanding to full size at boot
 # ==========================================================================
@@ -553,49 +647,6 @@ function Dismount-Vhdx([string]$Path) {
 }
 
 # ==========================================================================
-# Desktop shortcut that restarts into one environment (asks for confirmation, then
-# bcdedit /bootsequence + restart). It runs a small .cmd kept in <VHD folder>\shortcuts and
-# is flagged "Run as administrator" because bcdedit needs elevation.
-function New-RestartShortcut([string]$Id, [string]$Label, [string]$EnvName) {
-  $dir = Join-Path (Get-VhdFolder) 'shortcuts'
-  New-Item -ItemType Directory -Path $dir -Force | Out-Null
-  $safe = ($EnvName -replace '[\\/:*?"<>|%^&!]', '_').Trim()
-  if (-not $safe) { $safe = 'environment' }
-  $shown = ($Label -replace '[%^&!"<>|]', '_')
-  $cmdPath = Join-Path $dir "Restart into $safe.cmd"
-  $lines = @(
-    '@echo off',
-    "title Restart into $shown",
-    "echo This will restart the PC into: $shown",
-    'echo (one time only; the normal default boot is not changed)',
-    'echo.',
-    'choice /c YN /m "Save your work first. Restart now"',
-    'if errorlevel 2 exit /b 1',
-    "`"$BcdEdit`" /bootsequence $Id",
-    'if errorlevel 1 (echo Could not set the boot sequence. The boot menu entry may have been removed. & pause & exit /b 1)',
-    "`"$(Join-Path $Sys32 'shutdown.exe')`" /r /t 5"
-  )
-  Set-Content -LiteralPath $cmdPath -Value $lines -Encoding ASCII
-
-  $lnkPath = Join-Path ([Environment]::GetFolderPath('Desktop')) "Restart into $safe.lnk"
-  $sh = New-Object -ComObject WScript.Shell
-  $lnk = $sh.CreateShortcut($lnkPath)
-  $lnk.TargetPath = $CmdExe
-  $lnk.Arguments = "/c `"`"$cmdPath`"`""
-  $lnk.WorkingDirectory = $Sys32
-  $lnk.IconLocation = (Join-Path $Sys32 'shell32.dll') + ',27'
-  $lnk.Description = "Restart into $shown (one time)"
-  $lnk.Save()
-  [void][Runtime.InteropServices.Marshal]::ReleaseComObject($sh)
-
-  # set the "Run as administrator" flag (bit 0x20 of the byte at offset 0x15)
-  $bytes = [IO.File]::ReadAllBytes($lnkPath)
-  $bytes[0x15] = $bytes[0x15] -bor 0x20
-  [IO.File]::WriteAllBytes($lnkPath, $bytes)
-  Write-Log "Desktop shortcut created: $lnkPath"
-  return $lnkPath
-}
-
 #  System checks
 # ==========================================================================
 function Get-EncryptionStatus([string]$DriveLetter) {
@@ -1035,6 +1086,26 @@ function Reset-Env {
   Write-Log "'$($e.Name)' reset. Its boot menu entry still works."
 }
 
+# Estimated size of the merged disk: file sizes of an environment and its whole parent chain.
+# Returns 0 (= unknown, bar stays indeterminate) when a parent file cannot be found.
+function Get-ChainBytes($e) {
+  try {
+    $dir = Split-Path $e.Path -Parent
+    $total = [long](Get-Item -LiteralPath $e.Path -ErrorAction Stop).Length
+    $parent = $e.Parent
+    for ($i = 0; $i -lt 12 -and $parent; $i++) {
+      if ($parent -eq '?') { return [long]0 }
+      $pp = Join-Path $dir (Split-Path $parent -Leaf)
+      if (-not (Test-Path -LiteralPath $pp)) { return [long]0 }
+      $total += [long](Get-Item -LiteralPath $pp -ErrorAction Stop).Length
+      $parent = Get-VhdxParentFromHeader $pp
+      if ($null -eq $parent) { return [long]0 }
+    }
+    return $total
+  }
+  catch { return [long]0 }
+}
+
 function New-StandaloneCopy {
   $e = Get-SelectedEnv
   Assert-NotRunning $e
@@ -1048,13 +1119,16 @@ function New-StandaloneCopy {
 
   if ($e.Type -ne 'Child') {
     Write-Log "'$($e.Name)' has no parent - making a plain copy."
-    Invoke-External -CommandLine ('copy /y "' + $e.Path + '" "' + $path + '"') -Silent | Out-Null
+    Show-Progress 'Creating standalone copy...'
+    $srcLen = 0; try { $srcLen = (Get-Item -LiteralPath $e.Path -ErrorAction Stop).Length } catch {}
+    Invoke-External -CommandLine ('copy /y "' + $e.Path + '" "' + $path + '"') -Silent -ProgressFile $path -ProgressTotalBytes $srcLen | Out-Null
     Set-ItemProperty -LiteralPath $path -Name IsReadOnly -Value $false
   }
   elseif ($script:HasHyperV) {
     Write-Log 'Merging the environment and its base into one file with Convert-VHD...'
     $cmd = '"' + $PsExe + '" -NoProfile -Command "Convert-VHD -Path ''' + $e.Path + ''' -DestinationPath ''' + $path + ''' -VHDType Dynamic"'
-    Invoke-External -CommandLine $cmd | Out-Null
+    Show-Progress 'Creating standalone copy...'
+    Invoke-External -CommandLine $cmd -ProgressFile $path -ProgressTotalBytes (Get-ChainBytes $e) | Out-Null
   }
   else {
     if (-not $gb) {
@@ -1063,7 +1137,8 @@ function New-StandaloneCopy {
       $gb = [int]$t
     }
     Write-Log 'Merging the environment and its base into one file with diskpart...'
-    Invoke-Diskpart @("create vdisk file=`"$path`" source=`"$($e.Path)`" type=expandable maximum=$($gb * 1024)")
+    Show-Progress 'Creating standalone copy...'
+    Invoke-Diskpart @("create vdisk file=`"$path`" source=`"$($e.Path)`" type=expandable maximum=$($gb * 1024)") -ProgressFile $path -ProgressTotalBytes (Get-ChainBytes $e)
   }
   Set-MetaEntry "$name.vhdx" '' $gb
   Write-Log "Standalone copy created: $path"
@@ -1556,6 +1631,45 @@ public class RCard : Panel {
         g.Clear(Parent != null ? Parent.BackColor : Color.White);
         using (GraphicsPath p = Gfx.Round(new Rectangle(0, 0, Width - 1, Height - 1), Radius))
         using (SolidBrush b = new SolidBrush(BackColor)) using (Pen pen = new Pen(Edge)) { g.FillPath(b, p); g.DrawPath(pen, p); }
+    }
+}
+
+// slim rounded progress bar: Value 0-100 or Indeterminate (sliding segment, own timer)
+public class RProgress : Control {
+    int val; bool indet; int phase; Timer tm;
+    public RProgress() {
+        SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
+        BackColor = Color.White; TabStop = false; Font = new Font("Consolas", 8.5f);
+        tm = new Timer(); tm.Interval = 30; tm.Tick += delegate { phase = (phase + 5) % 1000; Invalidate(); };
+    }
+    public int Value { get { return val; } set { int v = Math.Max(0, Math.Min(100, value)); if (v != val) { val = v; Invalidate(); } } }
+    public bool Indeterminate { get { return indet; } set { if (indet != value) { indet = value; phase = 0; Sync(); Invalidate(); } } }
+    void Sync() { if (indet && Visible) tm.Start(); else tm.Stop(); }
+    protected override void OnVisibleChanged(EventArgs e) { Sync(); base.OnVisibleChanged(e); }
+    protected override void Dispose(bool d) { if (d) tm.Dispose(); base.Dispose(d); }
+    protected override void OnPaint(PaintEventArgs e) {
+        Graphics g = e.Graphics; g.SmoothingMode = SmoothingMode.AntiAlias;
+        g.Clear(Parent != null ? Parent.BackColor : Color.White);
+        int tw = 0; string txt = indet ? "" : val + " %";
+        if (txt.Length > 0) tw = TextRenderer.MeasureText(txt, Font, new Size(200, 30), TextFormatFlags.NoPadding).Width + 8;
+        int bh = 8, y = (Height - bh) / 2, w = Width - tw - 1;
+        if (w < 10) return;
+        Rectangle tr = new Rectangle(0, y, w, bh);
+        using (GraphicsPath p = Gfx.Round(tr, 4)) using (SolidBrush b = new SolidBrush(Gfx.C("#E6E6E6")))  using (Pen pen = new Pen(Gfx.C("#DDDDDD"))) { g.FillPath(b, p); g.DrawPath(pen, p); }
+        Region old = g.Clip;
+        using (GraphicsPath clip = Gfx.Round(tr, 4)) g.SetClip(clip, CombineMode.Intersect);
+        using (SolidBrush fb = new SolidBrush(Gfx.C("#FF4F00"))) {
+            if (indet) {
+                int sw = w * 3 / 10, span = w + sw, x = (int)((long)span * phase / 1000) - sw;
+                using (GraphicsPath sp = Gfx.Round(new Rectangle(x, y, sw, bh), 4)) g.FillPath(fb, sp);
+            } else if (val > 0) {
+                int fw = Math.Max(bh, (int)((long)w * val / 100));
+                using (GraphicsPath fp = Gfx.Round(new Rectangle(0, y, fw, bh), 4)) g.FillPath(fb, fp);
+            }
+        }
+        g.Clip = old;
+        if (txt.Length > 0)
+            TextRenderer.DrawText(g, txt, Font, new Rectangle(w + 8, 0, Width - w - 8, Height), Gfx.C("#6B6B6B"), TextFormatFlags.VerticalCenter | TextFormatFlags.Right | TextFormatFlags.NoPadding | TextFormatFlags.SingleLine);
     }
 }
 
@@ -2410,6 +2524,11 @@ $Form.ClientSize = New-Object System.Drawing.Size(1120, 770)
 $Form.BackColor = $script:cWhite; $Form.ForeColor = $script:cInk
 $Form.Font = $script:fBody
 $Form.KeyPreview = $true
+# Window / taskbar icon (assets\icon.ico next to this script; the default icon is kept if it is missing)
+try {
+  $iconFile = Join-Path $PSScriptRoot 'assets\icon.ico'
+  if (Test-Path -LiteralPath $iconFile) { $Form.Icon = New-Object System.Drawing.Icon($iconFile) }
+} catch { }
 $script:Form = $Form
 
 # Window size / position is remembered between runs
@@ -2524,11 +2643,6 @@ Put (Lbl 'Max size (GB)') 0 4; Put $hSize 1 4
 
 $ChkAddBoot = New-Check 'Add it to the boot menu (needed to set it up)' $true 'Add to boot menu' 'Creates a boot menu entry for the base so you can start it once and finish Windows setup. Your current Windows stays the default.'
 $script:ChkAddBoot = $ChkAddBoot
-# Window / taskbar icon (assets\icon.ico next to this script; the default icon is kept if it is missing)
-try {
-  $iconFile = Join-Path $PSScriptRoot 'assets\icon.ico'
-  if (Test-Path -LiteralPath $iconFile) { $Form.Icon = New-Object System.Drawing.Icon($iconFile) }
-} catch { }
 $ChkNoExpand = New-Check "Don't expand the file to full size when booted (saves disk space)" $false "Don't expand at boot" 'Normally Windows grows a dynamic VHDX to its FULL maximum size while it is booted (a 100 GB disk takes 100 GB on the drive). Ticking this writes VirtualDiskExpandOnMount=4 into the new Windows, so files stay small. Every environment built on this base inherits it. Risk: if the physical drive fills up completely, the running environment crashes.'
 $script:ChkNoExpand = $ChkNoExpand
 Put (Lbl 'Options') 0 5; Put $ChkAddBoot 1 5 3; Put $ChkNoExpand 1 6 3
@@ -2631,6 +2745,10 @@ $rp.Controls.Add((New-Btn 'Open snapshots folder' 'ghost' 'Opens <VHD folder>\sn
 Add-EnvGroup 'Boot menu'
 $rp.Controls.Add((New-Btn 'Restart into this' 'ghost' 'Restarts the PC straight into the selected environment, for this one restart only (bcdedit /bootsequence). Your default does not change. You are asked before the restart happens.' {
     $e = Get-SelectedEnv; Assert-NoChildren $e; $b = Get-EnvBootEntry $e -OfferToAdd; Update-All; Start-RestartInto $b.Id $b.Description }))
+$rp.Controls.Add((New-Btn 'Create desktop shortcut' 'ghost' 'Puts a shortcut on your desktop that restarts the PC into the selected environment, for that one restart only (it asks for confirmation and administrator rights first). If the environment is not in the boot menu yet, you are offered to add it.' {
+    $e = Get-SelectedEnv; Assert-NoChildren $e; $b = Get-EnvBootEntry $e -OfferToAdd; Update-All
+    $p = New-RestartShortcut $b.Id $b.Description $e.Name
+    Show-Info "Shortcut created on your desktop:`r`n$p`r`n`r`nIf you later remove and re-add this environment's boot menu entry, create the shortcut again." }))
 $rp.Controls.Add((New-Btn 'Set as default boot' 'ghost' 'Makes the selected environment the one that starts automatically when nobody picks from the boot menu.' {
     $e = Get-SelectedEnv; Assert-NoChildren $e; $b = Get-EnvBootEntry $e -OfferToAdd; Invoke-Bcd @('/default', $b.Id) | Out-Null; Write-Log "Default boot is now '$($b.Description)'."; Update-All }))
 $rp.Controls.Add((New-Btn 'Add boot menu entry' 'ghost' 'Adds the selected environment to the boot menu, e.g. a standalone copy, or an environment whose entry you removed. Not allowed for a base that others are built on.' {
@@ -2745,10 +2863,6 @@ function Show-Page([int]$i) {
   for ($k = 0; $k -lt $script:pageList.Count; $k++) { $script:pageList[$k].Visible = ($k -eq $i) }
   $script:Nav.Pick($i)
   $script:PageTitle.Text = $script:Nav.Items[$i]
-$rp.Controls.Add((New-Btn 'Create desktop shortcut' 'ghost' 'Puts a shortcut on your desktop that restarts the PC into the selected environment, for that one restart only (it asks for confirmation and administrator rights first). If the environment is not in the boot menu yet, you are offered to add it.' {
-    $e = Get-SelectedEnv; Assert-NoChildren $e; $b = Get-EnvBootEntry $e -OfferToAdd; Update-All
-    $p = New-RestartShortcut $b.Id $b.Description $e.Name
-    Show-Info "Shortcut created on your desktop:`r`n$p`r`n`r`nIf you later remove and re-add this environment's boot menu entry, create the shortcut again." }))
   $script:pageList[$i].BringToFront()
   if ($i -eq 2) { & $script:envLayout $script:rp $null }
   # Backup / restore: re-read the saved boot-configuration backups every time the page is opened
@@ -2979,8 +3093,13 @@ $script:LogBox = $LogBox; [Gfx]::Explorer($LogBox)
 $logLine = New-Object System.Windows.Forms.Panel; $logLine.Dock = 'Top'; $logLine.Height = 7; $logLine.BackColor = $script:cWhite
 $logLine.Add_Paint({ param($s, $e) $e.Graphics.DrawLine($script:penHair, 0, 3, $s.Width, 3) })
 $StatusLbl = New-Label '' (New-Object System.Drawing.Font('Consolas', 8.5)) $script:cGrey
-$StatusLbl.Dock = 'Top'; $StatusLbl.Height = 20; $StatusLbl.TextAlign = 'MiddleLeft'
+$StatusLbl.Dock = 'Fill'; $StatusLbl.TextAlign = 'MiddleLeft'
 $script:StatusLbl = $StatusLbl
+# status row: status text on the left, slim progress bar (hidden unless a long operation runs) on the right
+$ProgBar = New-Object RProgress; $ProgBar.Dock = 'Right'; $ProgBar.Width = 230; $ProgBar.Visible = $false
+$script:ProgBar = $ProgBar
+$StatusRow = New-Object System.Windows.Forms.Panel; $StatusRow.Dock = 'Top'; $StatusRow.Height = 20; $StatusRow.BackColor = $script:cWhite
+$StatusRow.Controls.Add($StatusLbl); $StatusRow.Controls.Add($ProgBar)
 $DescText = New-Object System.Windows.Forms.TextBox
 $DescText.Multiline = $true; $DescText.ReadOnly = $true; $DescText.BorderStyle = 'None'; $DescText.BackColor = $script:cWhite; $DescText.ForeColor = $script:cGrey
 $DescText.Font = $script:fBody; $DescText.ScrollBars = 'None'; $DescText.Dock = 'Top'; $DescText.Height = 66
@@ -2988,7 +3107,7 @@ $DescText.Font = $script:fBody; $DescText.ScrollBars = 'None'; $DescText.Dock = 
 $DescTitle = New-Label 'Description' (New-Object System.Drawing.Font('Segoe UI Semibold', 10.5)) $script:cInk
 $DescTitle.Dock = 'Top'; $DescTitle.Height = 22
 $script:DescTitle = $DescTitle; $script:DescText = $DescText
-$botCard.Controls.Add($LogBox); $botCard.Controls.Add($logLine); $botCard.Controls.Add($StatusLbl); $botCard.Controls.Add($DescText); $botCard.Controls.Add($DescTitle)
+$botCard.Controls.Add($LogBox); $botCard.Controls.Add($logLine); $botCard.Controls.Add($StatusRow); $botCard.Controls.Add($DescText); $botCard.Controls.Add($DescTitle)
 Show-HelpText 'Hover over any button' 'Move the mouse over a button or field and its explanation appears here. Work through the pages from top to bottom: check the PC, create a base Windows, then create environments from it.'
 
 $script:botCard = $botCard

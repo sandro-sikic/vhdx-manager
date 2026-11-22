@@ -369,6 +369,10 @@ A standalone copy merges an environment with its base into **one independent ful
 5. Wait. The tool merges the disks with Hyper-V `Convert-VHD` if the module is available, otherwise with `diskpart`. If it cannot find the base's maximum size it asks for it (the new disk must be at least that big). A disk with no parent is simply copied.
 6. When asked _Add '<name>' to the boot menu?_ click **Yes** to boot it.
 
+While it runs, a **progress bar with a percentage** shows in the status row above the log (it is approximate for merges, and slides back and forth when the size is not known yet).
+
+![Bottom panel with the progress bar at 45 percent while a standalone copy is made](docs/images/08-progress.png)
+
 **Expected result:** a new `.vhdx` with type **Standalone** appears in the list.
 
 **What can go wrong:** _"... already exists."_ (choose another name); not enough free space on the drive.
@@ -389,11 +393,11 @@ A standalone copy merges an environment with its base into **one independent ful
 | -------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
 | Set as default | Makes the entry start automatically when nobody picks one.                                                                           |
 | Restart into this | Boots it once on the next restart; the default does not change. You are asked before the restart.                                 |
+| Create desktop shortcut | Puts a desktop shortcut that restarts into it once (asks to confirm, runs as administrator). Re-create it if you re-add the boot entry. |
 | Rename         | Changes the entry's name (asks for the new boot menu name).                                                                          |
 | Delete entry   | Removes the entry from the menu after confirmation (_Remove '<name>' from the boot menu? (No files are deleted.)_). The entry of the Windows you are running cannot be deleted. |
 | Refresh        | Re-reads the boot menu.                                                                                                              |
 
-| Create desktop shortcut | Puts a desktop shortcut that restarts into it once (asks to confirm, runs as administrator). Re-create it if you re-add the boot entry. |
 4. **Boot menu wait (seconds)**: type a number (0-999; 0 skips the menu) and click **Set wait**.
 
 Every change here is backed up automatically first (see [Guide 7](#guide-7-back-up-and-restore-the-boot-configuration)).
@@ -560,15 +564,15 @@ Keyboard: **Ctrl+1** to **Ctrl+5** switch pages (not while an action is running)
 | Group      | Button                          | What it does                                                                                                   |
 | ---------- | ------------------------------- | -------------------------------------------------------------------------------------------------------------- |
 | Create     | New environment from selected   | Creates a differencing child of the selected base, adds a boot entry, offers to lock the base.                 |
-| Create     | Make standalone copy            | Merges an environment with its base into one independent full disk.                                            |
+| Create     | Make standalone copy            | Merges an environment with its base into one independent full disk. A progress bar with a percentage shows in the status row meanwhile (approximate for merges). |
 | Snapshots  | Snapshot                        | Copies the environment into `snapshots\` as `<name>__<timestamp>[_note].vhdx`.                                 |
 | Snapshots  | Restore snapshot...             | Rolls the environment back to a chosen snapshot.                                                               |
 | Snapshots  | Open snapshots folder           | Opens `snapshots\` in Explorer.                                                                                |
+| Boot menu  | Create desktop shortcut         | Desktop shortcut that does the same as _Restart into this_ with one double-click.                              |
 | Boot menu  | Restart into this               | Boots it for one restart only (`bcdedit /bootsequence`); default unchanged.                                    |
 | Boot menu  | Set as default boot             | Makes it the automatic boot choice.                                                                            |
 | Boot menu  | Add boot menu entry             | Adds an entry (asks for the name). Not allowed for a base that others are built on.                            |
 | Boot menu  | Rename boot menu entry          | Changes the name shown in the boot menu.                                                                       |
-| Boot menu  | Create desktop shortcut         | Desktop shortcut that does the same as _Restart into this_ with one double-click.                              |
 | Boot menu  | Remove boot menu entries        | Removes the entries; the file is kept.                                                                         |
 | Boot menu  | Disable expand-on-boot          | Applies the no-expand registry setting to an existing environment.                                             |
 | Manage     | Change max size...              | Grows (or, with the Hyper-V module, shrinks) the maximum size of a standalone disk. See [Guide 4](#guide-4-resize-an-environment). |
